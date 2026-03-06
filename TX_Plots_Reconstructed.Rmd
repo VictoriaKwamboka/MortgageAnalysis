@@ -1,0 +1,1346 @@
+---
+title: "TX – Reconstructed Plots (Figures 2, 3, 4, 5 & Appendix A3)"
+author: "Victoria"
+date: "2024-10-28"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.width = 10, fig.height = 6)
+
+setwd('/Users/victoria/Library/CloudStorage/OneDrive-BowlingGreenStateUniversity/BGSU/PhDing/MortgageAnalysis')
+
+packages <- c('data.table', "conflicted", "car", "forcats", "readr", "tidyverse",
+              "tinytex", "datasets", "here", "data.table", "maps", "usmap",
+              "stringr", "dplyr", "knitr", "parallel", "psych",
+              "glmnet", "ggcorrplot", "sf", "tigris", "patchwork", "scales",
+              "RColorBrewer", "viridis", "kableExtra", "cowplot")
+
+installed_packages <- packages %in% rownames(installed.packages())
+if (any(installed_packages == FALSE)) {
+  install.packages(packages[!installed_packages])
+}
+invisible(lapply(packages, library, character.only = TRUE))
+conflicts_prefer(dplyr::filter())
+
+# ── Load and prepare data (mirrors TX_Rnd2_corrected.Rmd) ─────────────────────
+
+data_18 <- fread('state_TX_2018.csv')
+data_19 <- fread('state_TX_2019.csv')
+data_20 <- fread('state_TX_2020.csv')
+data_21 <- fread('state_TX_2021.csv')
+data_22 <- fread('state_TX_2022.csv')
+data_23 <- fread('state_TX_2023.csv')
+
+merged_data <- rbindlist(list(data_18, data_19, data_20, data_21, data_22, data_23),
+                         use.names = TRUE, fill = TRUE)
+
+remove_cols <- function(df) {
+  df %>%
+    filter(loan_term == "360" & lien_status == 1 & construction_method == 1 &
+           business_or_commercial_purpose == 2 & total_units == 1 &
+           loan_purpose == 1 & occupancy_type == 1 &
+           conforming_loan_limit == "C" & derived_race != "Free Form Text Only")
+}
+
+df <- remove_cols(merged_data)
+df <- df[, -c(7,9,17,18,19,21,24:38,40,41:44,45,51:59,63:66,68:73,76,77,80:83,85:88,92)]
+df[, c(1:15,21:35)] <- lapply(df[, c(1:15,21:35)], factor)
+
+df <- df %>% filter(!(action_taken %in% c("7","8")))
+
+df$derived_action_taken <- car::recode(df$action_taken,
+  'c("1","6")="Approved"; c("2","3")="Denied"; else="Withdrawn/Incomplete"')
+
+# Keep only completed applications (approved or denied)
+df <- df %>% filter(derived_action_taken %in% c("Approved","Denied"))
+
+df$derived_applicant_sex <- car::recode(df$applicant_sex,
+  'c("1")="Male"; c("2")="Female"; c("4")="Not Applicable"; else="Other"')
+
+df$derived_co_applicant_sex <- car::recode(df$`co-applicant_sex`,
+  'c("1")="Male"; c("2")="Female"; c("4")="Not Applicable"; c("5")="No_Coapplicant"; else="Other"')
+
+df$applicant_age <- factor(df$applicant_age,
+  levels = c('<25','25-34','35-44','45-54','55-64','65-74','>74','8888'))
+
+df <- df %>%
+  mutate(race = ifelse(
+    derived_ethnicity == "Joint" | derived_race == "Joint" |
+      derived_sex == "Joint" | derived_co_applicant_sex %in% c(1,2,6), "Joint",
+    ifelse(derived_ethnicity == "Hispanic or Latino" &
+             (`applicant_race-1` %in% c(5,6,7) |
+              derived_race %in% c("White","Race Not Available")), "Hispanic White",
+           ifelse(`applicant_race-1` %in% c(2,27) | derived_race == "Asian", "Asian",
+                  ifelse(derived_ethnicity == "Not Hispanic or Latino" &
+                           (`applicant_race-1` %in% c(5,6,7) | derived_race == "White") |
+                           derived_race == "White", "Non-Hispanic White",
+                         ifelse(`applicant_race-1` %in% c(1,4,21:26,41:43) |
+                                  derived_race %in% c("2 or more minority races",
+                                    "American Indian or Alaska Native",
+                                    "Native Hawaiian or Other Pacific Islander"),
+                                "Other Minority Races",
+                                ifelse(`applicant_race-1` == 3 |
+                                         derived_race == "Black or African American",
+                                       "Black or African American", "Missing")))))))
+
+df_2 <- df %>% dplyr::select(-c(2:4,12:13,22:27,31,32,34,35))
+
+df_3 <- df_2 %>% filter(income != 'NA') %>% filter(income != 0)
+df_3 <- na.omit(df_3)
+df_3[, c(12:14,21:27)] <- as.data.frame(lapply(df_3[, c(12:14,21:27)], as.numeric))
+
+df_3$income_bins <- cut(df_3$income,
+  breaks = c(0,50,100,150,200,300,400,500,600,1000,2000,Inf), include.lowest = TRUE)
+df_3$log_income     <- log(df_3$income)
+df_3$ltv_bins       <- cut(df_3$loan_to_value_ratio,
+  breaks = c(0,60,80,90,100,150,Inf), include.lowest = TRUE)
+df_3$dti_g50        <- ifelse(
+  df_3$debt_to_income_ratio %in% c("<20%",'20%-<30%','30%-<36%',
+    '36','37','38','39','40','41','42','43','44','45','46','47','48','49'),
+  '<50%','>=50%')
+df_3$property_value_thousands <- df_3$property_value / 1000
+df_3$property_value_bins <- cut(df_3$property_value_thousands,
+  breaks = c(0,200,400,500,1000,1500,Inf), include.lowest = TRUE)
+df_3$loan_amt_thousands <- df_3$loan_amount / 1000
+
+df_3 <- within(df_3, applicant_age       <- relevel(applicant_age,       ref='35-44'))
+df_3 <- within(df_3, ltv_bins            <- relevel(ltv_bins,            ref='(90,100]'))
+df_3 <- within(df_3, property_value_bins <- relevel(property_value_bins, ref='(200,400]'))
+df_3 <- within(df_3, derived_sex         <- relevel(derived_sex,         ref='Joint'))
+df_3$race <- factor(df_3$race)
+df_3 <- within(df_3, race <- relevel(race, ref='Non-Hispanic White'))
+df_3 <- df_3[complete.cases(df_3), ]
+df_3$denied <- as.integer(df_3$derived_action_taken == "Denied")
+```
+
+
+---
+
+# Figure 1 — County-Level Denial Rates and Annual Changes (2018–2023)
+
+Six choropleth maps show the raw mortgage denial rate per county for each year.
+Counties with fewer than 10 applications are excluded (shown in grey).
+A second set of panels shows the year-over-year percentage-point change in
+denial rate, matching the "annual rate changes" panel described in the manuscript.
+
+```{r figure1_county_denial_rates, fig.height=10, fig.width=14}
+
+options(tigris_use_cache = TRUE)
+tx_counties <- counties(state = "TX", cb = TRUE, year = 2020) %>%
+  mutate(county_code = paste0(STATEFP, COUNTYFP))
+
+# ── County denial rates for every year ────────────────────────────────────────
+years <- 2018:2023
+
+county_rates <- df_3 %>%
+  mutate(county_code  = as.character(county_code),
+         activity_year = as.integer(as.character(activity_year))) %>%
+  group_by(activity_year, county_code) %>%
+  summarise(
+    n_apps      = n(),
+    denial_rate = mean(denied) * 100,
+    .groups     = "drop"
+  ) %>%
+  filter(n_apps >= 10)
+
+# ── Year-over-year change in denial rate ─────────────────────────────────────
+county_changes <- county_rates %>%
+  arrange(county_code, activity_year) %>%
+  group_by(county_code) %>%
+  mutate(delta = denial_rate - dplyr::lag(denial_rate)) %>%
+  ungroup() %>%
+  filter(!is.na(delta))
+
+# ── Shared denial-rate colour scale (all years) ───────────────────────────────
+rate_breaks <- c(0, 5, 10, 15, 20, 25, 30, Inf)
+rate_labels <- c("0–5%","5–10%","10–15%","15–20%","20–25%","25–30%",">30%")
+rate_colors <- c("#2166AC","#74ADD1","#FEE090","#FDAE61","#F46D43","#D73027","#A50026")
+
+county_rates <- county_rates %>%
+  mutate(rate_cat = cut(denial_rate, breaks = rate_breaks,
+                        labels = rate_labels, include.lowest = TRUE))
+
+# ── Panel helper: denial rate map ─────────────────────────────────────────────
+make_rate_map <- function(yr) {
+  map_data <- tx_counties %>%
+    left_join(filter(county_rates, activity_year == yr), by = "county_code") %>%
+    mutate(rate_cat = factor(rate_cat, levels = rate_labels))
+
+  ggplot(map_data) +
+    geom_sf(aes(fill = rate_cat), color = "white", size = 0.1) +
+    scale_fill_manual(values  = rate_colors,
+                      na.value = "#D9D9D9",
+                      name    = "Denial Rate",
+                      drop    = FALSE) +
+    labs(title = as.character(yr)) +
+    theme_void() +
+    theme(plot.title      = element_text(hjust = 0.5, size = 10, face = "bold"),
+          legend.position = "none")
+}
+
+# ── Panel helper: year-over-year change map ───────────────────────────────────
+make_change_map <- function(yr_to) {
+  map_data <- tx_counties %>%
+    left_join(filter(county_changes, activity_year == yr_to), by = "county_code")
+
+  ggplot(map_data) +
+    geom_sf(aes(fill = delta), color = "white", size = 0.1) +
+    scale_fill_gradient2(low      = "#2166AC",
+                         mid      = "white",
+                         high     = "#D73027",
+                         midpoint = 0,
+                         na.value = "#D9D9D9",
+                         name     = "Δ pp",
+                         limits   = c(-10, 10),
+                         oob      = scales::squish) +
+    labs(title = paste0(yr_to - 1, "→", yr_to)) +
+    theme_void() +
+    theme(plot.title      = element_text(hjust = 0.5, size = 9, face = "bold"),
+          legend.position = "none")
+}
+
+# ── Build all panels ──────────────────────────────────────────────────────────
+rate_maps   <- lapply(years,        make_rate_map)
+change_maps <- lapply(2019:2023,    make_change_map)
+
+# Shared legend for denial rate row
+legend_rate <- get_legend(
+  make_rate_map(2018) +
+    theme(legend.position = "right",
+          legend.title    = element_text(size = 8),
+          legend.text     = element_text(size = 7))
+)
+
+# Shared legend for change row
+legend_change <- get_legend(
+  make_change_map(2019) +
+    theme(legend.position = "right",
+          legend.title    = element_text(size = 8),
+          legend.text     = element_text(size = 7))
+)
+
+# Row 1: denial rates 2018–2023 (6 panels + legend)
+row1 <- wrap_plots(rate_maps, nrow = 2) + plot_layout(guides = "collect") &
+  theme(legend.position = "right",
+        legend.title    = element_text(size = 8),
+        legend.text     = element_text(size = 7))
+
+# Row 2: year-over-year change (5 panels + legend)
+row2 <- wrap_plots(change_maps, nrow = 2) + plot_layout(guides = "collect") &
+  theme(legend.position = "right",
+        legend.title    = element_text(size = 8),
+        legend.text     = element_text(size = 7))
+row1
+# Stack both rows
+row1 / row2 +
+  plot_annotation(
+    title   = "Figure 1: County-Level Mortgage Denial Rates and Annual Changes (Texas, 2018–2023)",
+    caption = "Grey = counties with fewer than 10 applications. Change panels show percentage-point difference from prior year.",
+    theme   = theme(plot.title   = element_text(hjust = 0.5, size = 12, face = "bold"),
+                    plot.caption = element_text(size = 7, hjust = 0))
+  )
+```
+
+
+---
+
+# Figure 2 — Pearson Correlation Matrix (2018 and 2023)
+
+The manuscript reports the Pearson correlation matrix for 2018 and 2023 across
+numerical variables including log income, loan amount, property value, LTV,
+minority population %, owner-occupied units, 1-to-4 family homes, and median
+housing age. Darker blue = stronger positive correlation; darker red = stronger
+negative association.
+
+```{r figure2_correlation, fig.height=5, fig.width=12}
+
+# Numerical variables used in the correlation analysis (matches manuscript Table 2)
+# Correct HMDA column names confirmed from raw CSV headers
+
+
+corr_vars <- c('log_income', 'loan_amt_thousands', 'property_value_thousands',
+               'loan_to_value_ratio', 'tract_minority_population_percent',
+               'ffiec_msa_md_median_family_income',
+               'tract_to_msa_income_percentage',
+               'tract_owner_occupied_units',
+               'tract_one_to_four_family_homes',
+               'tract_median_age_of_housing_units')
+
+make_corr_plot <- function(yr, df) {
+  dat <- df %>%
+    filter(activity_year == yr) %>%
+    dplyr::select(all_of(corr_vars)) %>%
+    mutate(across(everything(), as.numeric)) %>%
+    na.omit()
+
+  corr_mat <- round(cor(dat, method = "pearson"), 2)
+
+  # Shorter axis labels for readability
+  labels <- c('Log Income', 'Loan Amt (k)', 'Prop Value (k)',
+               'LTV', 'Minority %', 'FFIEC Income',
+               'Tract/MSA Income', 'Owner Occ Units', '1-4 Family Units',
+               'Median Housing Age')
+  colnames(corr_mat) <- rownames(corr_mat) <- labels
+
+  ggcorrplot(corr_mat,
+             method    = "square",
+             type      = "lower",
+             lab       = TRUE,
+             lab_size  = 2.5,
+             colors    = c("#D73027", "white", "#4575B4"),
+             outline.color = "grey80",
+             tl.cex    = 8,
+             title     = paste("Correlation Matrix —", yr)) +
+    theme(plot.title = element_text(hjust = 0.5, size = 11, face = "bold"),
+          legend.title = element_text(size = 8))
+}
+
+p2018 <- make_corr_plot(2018, df_3)
+p2023 <- make_corr_plot(2023, df_3)
+
+# Side-by-side layout (matches Figure 2 in manuscript)
+p2018 + p2023
+```
+
+
+---
+
+# Figure 3 — SIR Maps Before Risk Adjustment
+
+County-level Standardized Incidence Ratios (SIRs) benchmarked against the
+statewide denial rate (11.75% in 2018; 12.18% in 2023). The third panel shows
+the change in SIR between the two years. Counties with fewer than 10 applications
+are excluded (17 in 2018, 24 in 2023).
+
+```{r figure3_sir_unadjusted, fig.height=5, fig.width=14}
+
+# ── Texas county shapefile via tigris ─────────────────────────────────────────
+options(tigris_use_cache = TRUE)
+tx_counties <- counties(state = "TX", cb = TRUE, year = 2020) %>%
+  mutate(county_code = paste0(STATEFP, COUNTYFP))  # 5-digit FIPS e.g. "48001"
+
+# ── Compute county-level denial rates and raw SIRs ───────────────────────────
+compute_sir_unadjusted <- function(df, yr) {
+  year_data <- df %>% filter(activity_year == yr)
+
+  # Statewide denial rate for the year
+  state_rate <- mean(year_data$denied)
+
+  county_stats <- year_data %>%
+    mutate(county_code = as.character(county_code)) %>%  # factor -> character 5-digit FIPS
+    group_by(county_code) %>%                  # HMDA county_code is 3-digit FIPS
+    summarise(
+      n_apps   = n(),
+      n_denied = sum(denied),
+      obs_rate = mean(denied),
+      .groups  = "drop"
+    ) %>%
+    filter(n_apps >= 10) %>%                   # Exclude counties with <10 applications
+    mutate(SIR = obs_rate / state_rate,
+           year = yr)
+  county_stats
+}
+
+sir_18 <- compute_sir_unadjusted(df_3, 2018)
+sir_23 <- compute_sir_unadjusted(df_3, 2023)
+
+# Join with shapefile
+map_18 <- tx_counties %>%
+  left_join(sir_18, by = "county_code") %>%
+  mutate(SIR_label = case_when(
+    is.na(SIR) ~ "Insufficient data",
+    SIR < 0.75 ~ "< 0.75",
+    SIR < 1.00 ~ "0.75 – 1.00",
+    SIR < 1.25 ~ "1.00 – 1.25",
+    SIR < 1.50 ~ "1.25 – 1.50",
+    TRUE        ~ "> 1.50"))
+
+map_23 <- tx_counties %>%
+  left_join(sir_23, by = "county_code") %>%
+  mutate(SIR_label = case_when(
+    is.na(SIR) ~ "Insufficient data",
+    SIR < 0.75 ~ "< 0.75",
+    SIR < 1.00 ~ "0.75 – 1.00",
+    SIR < 1.25 ~ "1.00 – 1.25",
+    SIR < 1.50 ~ "1.25 – 1.50",
+    TRUE        ~ "> 1.50"))
+
+sir_levels <- c("< 0.75","0.75 – 1.00","1.00 – 1.25","1.25 – 1.50","> 1.50","Insufficient data")
+sir_colors <- c("#2166AC","#92C5DE","#FDDBC7","#F4A582","#D6604D","#D9D9D9")
+
+map_18$SIR_label <- factor(map_18$SIR_label, levels = sir_levels)
+map_23$SIR_label <- factor(map_23$SIR_label, levels = sir_levels)
+
+# Change in SIR 2018 → 2023
+sir_change <- sir_18 %>%
+  dplyr::select(county_code, SIR_18 = SIR) %>%
+  inner_join(sir_23 %>% dplyr::select(county_code, SIR_23 = SIR), by = "county_code") %>%
+  mutate(delta_SIR = SIR_23 - SIR_18)
+
+map_change <- tx_counties %>%
+  left_join(sir_change, by = "county_code")
+
+plot_sir_map <- function(map_data, title_text) {
+  ggplot(map_data) +
+    geom_sf(aes(fill = SIR_label), color = "white", size = 0.15) +
+    scale_fill_manual(values = sir_colors, na.value = "#D9D9D9",
+                      name = "SIR", drop = FALSE) +
+    labs(title = title_text) +
+    theme_void() +
+    theme(plot.title   = element_text(hjust = 0.5, size = 10, face = "bold"),
+          legend.title = element_text(size = 8),
+          legend.text  = element_text(size = 7))
+}
+
+plot_change_map <- function(map_data, title_text) {
+  ggplot(map_data) +
+    geom_sf(aes(fill = delta_SIR), color = "white", size = 0.15) +
+    scale_fill_gradient2(low = "#2166AC", mid = "white", high = "#D6604D",
+                         midpoint = 0, na.value = "#D9D9D9",
+                         name = "ΔSIR") +
+    labs(title = title_text) +
+    theme_void() +
+    theme(plot.title   = element_text(hjust = 0.5, size = 10, face = "bold"),
+          legend.title = element_text(size = 8),
+          legend.text  = element_text(size = 7))
+}
+
+p3a <- plot_sir_map(map_18, "SIR - 2018 (Before Adjustment)")
+p3b <- plot_sir_map(map_23, "SIR - 2023 (Before Adjustment)")
+p3c <- plot_change_map(map_change, "Change in SIR (2023 − 2018)")
+
+p3c + p3a / p3b + plot_layout(ncol = 2)
+
+p3c
+
+```
+
+
+
+```{r}
+# counties with missing values in sir map data
+length(map_18 %>% filter(is.na(SIR)) %>% pull(NAME)) #33
+length(map_23 %>% filter(is.na(SIR)) %>% pull(NAME)) #34
+
+
+length(map_change %>% filter(is.na(delta_SIR)) %>% pull(NAME)) #39
+
+
+```
+
+---
+
+# Figures 4 & 5 — SIR Maps After LASSO Risk Adjustment
+
+Using the LASSO-predicted denial probabilities as the expected rate, we compute
+adjusted SIRs. Figure 4 includes all counties (showing outliers); Figure 5 removes
+extreme outliers to improve interpretability.
+
+```{r lasso_for_sir, cache=TRUE}
+
+predictor_vars <- c('loan_amt_thousands', 'ffiec_msa_md_median_family_income',
+                    'income_bins', 'race', 'derived_sex',
+                    'tract_minority_population_percent',
+                    'applicant_age', 'ltv_bins', 'dti_g50', 'property_value_bins')
+
+fit_lasso <- function(yr, df) {
+  yearly_data <- df %>% filter(activity_year == yr)
+  x_mat <- model.matrix(
+    as.formula(paste("denied ~", paste(predictor_vars, collapse = " + "))),
+    data = yearly_data)[, -1]
+  y_vec <- yearly_data$denied
+  set.seed(123)
+  cv.glmnet(x = x_mat, y = y_vec, family = "binomial", alpha = 1,
+            type.measure = "mse", nfolds = 10)
+}
+
+predict_denial <- function(yr, df, cv_fit) {
+  yearly_data <- df %>% filter(activity_year == yr)
+  x_mat <- model.matrix(
+    as.formula(paste("denied ~", paste(predictor_vars, collapse = " + "))),
+    data = yearly_data)[, -1]
+  pred <- as.numeric(predict(cv_fit, newx = x_mat, s = "lambda.min", type = "response"))
+  yearly_data %>%
+    mutate(pred_prob   = pred,
+           county_code = as.character(county_code)) %>%  # factor -> character 5-digit FIPS
+    dplyr::select(county_code, denied, pred_prob)
+}
+
+cat("Fitting 2018 LASSO model...\n")
+fit_18 <- fit_lasso(2018, df_3)
+cat("Fitting 2023 LASSO model...\n")
+fit_23 <- fit_lasso(2023, df_3)
+
+preds_18 <- predict_denial(2018, df_3, fit_18)
+preds_23 <- predict_denial(2023, df_3, fit_23)
+```
+
+
+
+
+```{r figure4_sir_adjusted_with_outliers, fig.height=5, fig.width=10}
+
+compute_sir_adjusted <- function(preds) {
+  preds %>%
+    group_by(county_code) %>%
+    summarise(
+      n_apps        = n(),
+      obs_rate      = mean(denied),
+      expected_rate = mean(pred_prob),
+      .groups = "drop"
+    ) %>%
+    filter(n_apps >= 10) %>%
+    mutate(adj_SIR = obs_rate / expected_rate)
+}
+
+adj_sir_18 <- compute_sir_adjusted(preds_18)
+adj_sir_23 <- compute_sir_adjusted(preds_23)
+
+map_adj_18 <- tx_counties %>%
+  left_join(adj_sir_18, by = "county_code")
+map_adj_23 <- tx_counties %>%
+  left_join(adj_sir_23, by = "county_code")
+
+# Shared fill scale (including outliers) — Figure 4
+adj_range <- range(c(adj_sir_18$adj_SIR, adj_sir_23$adj_SIR), na.rm = TRUE)
+
+plot_adj_map <- function(map_data, title_text, sir_range = NULL) {
+  # Categorise adj_SIR into meaningful bins for clarity.
+  # Breaks mirror the unadjusted SIR scheme so both figures are directly comparable.
+  map_data <- map_data %>%
+    mutate(SIR_cat = case_when(
+      is.na(adj_SIR)  ~ "Insufficient data",
+      adj_SIR < 0.75  ~ "< 0.75",
+      adj_SIR < 1.00  ~ "0.75 – 1.00",
+      adj_SIR < 1.25  ~ "1.00 – 1.25",
+      adj_SIR < 1.50  ~ "1.25 – 1.50",
+      adj_SIR < 2.00  ~ "1.50 – 2.00",
+      TRUE            ~ "> 2.00"
+    ))
+
+  adj_levels <- c("< 0.75", "0.75 – 1.00", "1.00 – 1.25",
+                  "1.25 – 1.50", "1.50 – 2.00", "> 2.00", "Insufficient data")
+
+  # Diverging palette: blue (low denial) → white (average) → orange-red (high denial)
+  # Extra bin vs Figure 3 to better distinguish counties just above 1.50
+  adj_colors <- c("#2166AC", "#92C5DE", "#FDDBC7",
+                  "#F4A582", "#D6604D", "#A50026", "#D9D9D9")
+
+  map_data$SIR_cat <- factor(map_data$SIR_cat, levels = adj_levels)
+
+  ggplot(map_data) +
+    geom_sf(aes(fill = SIR_cat), color = "white", size = 0.15) +
+    scale_fill_manual(values   = adj_colors,
+                      na.value = "#D9D9D9",
+                      name     = "Adj. SIR",
+                      drop     = FALSE) +
+    labs(title = title_text) +
+    theme_void() +
+    theme(plot.title   = element_text(hjust = 0.5, size = 10, face = "bold"),
+          legend.title = element_text(size = 8),
+          legend.text  = element_text(size = 7))
+}
+
+# Figure 4 — with outliers (extreme counties fall into "> 2.00" bin; no stretching)
+p4a <- plot_adj_map(map_adj_18, "Adj. SIR - 2018")
+p4b <- plot_adj_map(map_adj_23, "Adj. SIR - 2023")
+
+p4a + p4b + plot_layout(ncol = 2)
+```
+
+# sir change post adjustment
+
+```{r}
+# Change in SIR 2018 → 2023
+sir_change_after <- adj_sir_18 %>%
+  dplyr::select(county_code, SIR_18 = adj_SIR) %>%
+  inner_join(adj_sir_23 %>% dplyr::select(county_code, SIR_23 = adj_SIR), by = "county_code") %>%
+  mutate(delta_SIR = SIR_23 - SIR_18)
+
+map_change_after <- tx_counties %>%
+  left_join(sir_change_after, by = "county_code")
+
+map_change_after$adj_SIR <- map_change_after$delta_SIR
+
+adj_range_after <- range(sir_change_after$delta_SIR, na.rm = TRUE)
+
+
+p4c <- plot_change_map(map_change_after, "Change in SIR (2023 − 2018)")
+p4c + p4a / p4b + plot_layout(ncol = 2)
+
+
+```
+
+
+# compare year to year
+
+```{r}
+sir_18_before_after <- sir_18 %>%
+  dplyr::select(county_code, SIR_before = SIR) %>%
+  inner_join(adj_sir_18 %>% dplyr::select(county_code, SIR_after = adj_SIR), by = "county_code") %>%
+  mutate(delta_SIR = SIR_after - SIR_before)
+
+sir_23_before_after <- sir_23 %>%
+  dplyr::select(county_code, SIR_before = SIR) %>%
+  inner_join(adj_sir_23 %>% dplyr::select(county_code, SIR_after = adj_SIR), by = "county_code") %>%
+  mutate(delta_SIR = SIR_after - SIR_before)
+```
+
+
+# Visualisation A — Scatter: Unadjusted vs Adjusted SIR (Figure 3 vs Figure 4)
+#
+# Each dot is one county. The diagonal line = no change after adjustment.
+# Above the line → adjusted SIR is HIGHER than unadjusted (structural barriers
+#   not explained by credit risk). Below → credit risk accounts for the disparity.
+# Outlier counties (SIR > 10 in either measure) are excluded for readability
+# but annotated in the caption.
+
+```{r sir_scatter_before_after, fig.height=5, fig.width=11}
+
+county_names <- tx_counties %>%
+  sf::st_drop_geometry() %>%
+  dplyr::select(county_code, NAME)
+
+cap_val <- 5   # cap for plot visibility; extreme outliers noted in caption
+
+make_scatter <- function(df, yr_label) {
+  d <- df %>%
+    left_join(county_names, by = "county_code") %>%
+    filter(!is.na(SIR_before), !is.na(SIR_after)) %>%
+    mutate(
+      SIR_before_capped = pmin(SIR_before, cap_val),
+      SIR_after_capped  = pmin(SIR_after,  cap_val),
+      direction = case_when(
+        SIR_after > SIR_before * 1.05 ~ "Higher after adjustment",
+        SIR_after < SIR_before * 0.95 ~ "Lower after adjustment",
+        TRUE                           ~ "Approximately unchanged"
+      ),
+      # label only counties that moved or remain notably above 1
+      label = ifelse((abs(delta_SIR) > 0.3 | SIR_after > 1.5) &
+                       SIR_before <= cap_val, NAME, NA)
+    )
+
+  ggplot(d, aes(x = SIR_before_capped, y = SIR_after_capped)) +
+    # reference diagonal
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed",
+                color = "grey50", linewidth = 0.6) +
+    # reference lines at SIR = 1
+    geom_hline(yintercept = 1, linetype = "dotted", color = "grey70") +
+    geom_vline(xintercept = 1, linetype = "dotted", color = "grey70") +
+    geom_point(aes(color = direction), size = 2.2, alpha = 0.75) +
+    ggrepel::geom_text_repel(aes(label = label), size = 2.4,
+                              max.overlaps = 15, segment.color = "grey60") +
+    scale_color_manual(
+      values = c("Higher after adjustment"     = "#D6604D",
+                 "Lower after adjustment"      = "#2166AC",
+                 "Approximately unchanged"     = "#878787"),
+      name = NULL) +
+    scale_x_continuous(limits = c(0, cap_val),
+                       labels = function(x) ifelse(x == cap_val,
+                                                   paste0("≥", cap_val), x)) +
+    scale_y_continuous(limits = c(0, cap_val),
+                       labels = function(x) ifelse(x == cap_val,
+                                                   paste0("≥", cap_val), x)) +
+    labs(title    = paste0(yr_label, ": Unadjusted vs Risk-Adjusted SIR"),
+         subtitle = "Above diagonal = disparity persists after credit risk control",
+         x = "Unadjusted SIR",
+         y = "Risk-Adjusted SIR") +
+    theme_minimal(base_size = 10) +
+    theme(legend.position  = "bottom",
+          plot.title       = element_text(face = "bold", hjust = 0.5),
+          plot.subtitle    = element_text(hjust = 0.5, color = "grey40", size = 8))
+}
+
+# ggrepel needed — install if missing
+if (!requireNamespace("ggrepel", quietly = TRUE)) install.packages("ggrepel")
+library(ggrepel)
+
+ps_18 <- make_scatter(sir_18_before_after, "2018")
+ps_23 <- make_scatter(sir_23_before_after, "2023")
+
+ps_18 + ps_23 +
+  plot_layout(guides = "collect") &
+  theme(legend.position = "bottom")
+```
+
+
+# Visualisation B — Dumbbell: Top counties by adjusted SIR (2018 & 2023)
+#
+# Shows the TOP 20 counties ranked by their risk-ADJUSTED SIR.
+# Blue dot = unadjusted (Figure 3); Red dot = adjusted (Figure 4).
+# Short segments → adjustment barely changes the picture → structural barriers.
+# Long segments → credit risk explained much of the raw disparity.
+
+```{r sir_dumbbell, fig.height=7, fig.width=12}
+
+make_dumbbell <- function(df, yr_label, n_top = 20) {
+  d <- df %>%
+    left_join(county_names, by = "county_code") %>%
+    filter(!is.na(SIR_before), !is.na(SIR_after)) %>%
+    arrange(desc(SIR_after)) %>%
+    slice_head(n = n_top) %>%
+    mutate(NAME = reorder(NAME, SIR_after))
+
+  ggplot(d) +
+    geom_segment(aes(x = SIR_before, xend = SIR_after,
+                     y = NAME,       yend = NAME,
+                     color = SIR_after > SIR_before),
+                 linewidth = 1.1, show.legend = FALSE) +
+    geom_point(aes(x = SIR_before, y = NAME),
+               color = "#2166AC", size = 3.2) +
+    geom_point(aes(x = SIR_after, y = NAME),
+               color = "#D6604D", size = 3.2) +
+    geom_vline(xintercept = 1, linetype = "dashed",
+               color = "grey50", linewidth = 0.5) +
+    scale_color_manual(values = c("TRUE" = "#D6604D", "FALSE" = "#2166AC")) +
+    annotate("text", x = Inf, y = -Inf,
+             label = "● Blue = unadjusted   ● Red = adjusted",
+             hjust = 1.05, vjust = -0.5, size = 3, color = "grey30") +
+    labs(title    = paste0(yr_label, ": Top 20 Counties - Unadjusted vs Risk-Adjusted SIR"),
+         subtitle = "Dashed line = statewide SIR = 1. Short gaps = disparity not explained by credit risk.",
+         x = "SIR", y = NULL) +
+    theme_minimal(base_size = 10) +
+    theme(plot.title    = element_text(face = "bold", hjust = 0.5),
+          plot.subtitle = element_text(hjust = 0.5, color = "grey40", size = 8),
+          panel.grid.major.y = element_line(color = "grey92"))
+}
+
+pd_18 <- make_dumbbell(sir_18_before_after, "2018")
+pd_23 <- make_dumbbell(sir_23_before_after, "2023")
+
+pd_18 + pd_23 + plot_layout(ncol = 2)
+```
+
+
+# Visualisation C — Top movers: Δ Adjusted SIR (2018→2023) + county population profiles
+#
+# Left panel  : lollipop of Δ adjusted SIR — which counties changed most?
+# Right panel : heatmap of county-level population characteristics (minority %,
+#               median income, % high DTI, median LTV) expressed as % deviation
+#               from the Texas statewide average. Same county order as lollipop.
+# Together they let the reader see immediately whether the counties that worsened
+# share a systematic socioeconomic profile.
+
+```{r sir_lollipop_profile, fig.height=7, fig.width=14, message=FALSE, warning=FALSE}
+
+n_top <- 20
+
+# ── 1. Identify top movers ────────────────────────────────────────────────────
+top_movers <- sir_change_after %>%
+  left_join(county_names, by = "county_code") %>%
+  filter(!is.na(delta_SIR)) %>%
+  mutate(abs_delta = abs(delta_SIR)) %>%
+  arrange(desc(abs_delta)) %>%
+  slice_head(n = n_top) %>%
+  mutate(direction = ifelse(delta_SIR > 0,
+                            "Worsened (2018\u21922023)",
+                            "Improved (2018\u21922023)"))
+
+top_codes <- top_movers$county_code
+
+# ── 2. County population profiles (all years pooled for stability) ─────────────
+county_profiles <- df_3 %>%
+  mutate(county_code = as.character(county_code),
+         income_k    = as.numeric(income),
+         ltv         = as.numeric(loan_to_value_ratio),
+         min_pct     = as.numeric(tract_minority_population_percent),
+         high_dti    = as.integer(dti_g50 == ">=50%")) %>%
+  filter(county_code %in% top_codes) %>%
+  group_by(county_code) %>%
+  summarise(
+    `Minority\nPop. (%)` = mean(min_pct,  na.rm = TRUE),
+    `Median\nIncome (k)` = median(income_k, na.rm = TRUE),
+    `DTI ≥50%\n(%)`      = mean(high_dti, na.rm = TRUE) * 100,
+    `Median\nLTV (%)`    = median(ltv,    na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# ── 3. Statewide averages for the same four measures ──────────────────────────
+statewide <- df_3 %>%
+  mutate(income_k = as.numeric(income),
+         ltv      = as.numeric(loan_to_value_ratio),
+         min_pct  = as.numeric(tract_minority_population_percent),
+         high_dti = as.integer(dti_g50 == ">=50%")) %>%
+  summarise(
+    `Minority\nPop. (%)` = mean(min_pct,  na.rm = TRUE),
+    `Median\nIncome (k)` = median(income_k, na.rm = TRUE),
+    `DTI ≥50%\n(%)`      = mean(high_dti, na.rm = TRUE) * 100,
+    `Median\nLTV (%)`    = median(ltv,    na.rm = TRUE)
+  )
+
+# ── 4. Compute % deviation from statewide mean for each characteristic ─────────
+chars <- c("Minority\nPop. (%)", "Median\nIncome (k)", "DTI ≥50%\n(%)", "Median\nLTV (%)")
+
+profile_long <- county_profiles %>%
+  pivot_longer(all_of(chars), names_to = "characteristic", values_to = "county_val") %>%
+  left_join(
+    statewide %>%
+      pivot_longer(everything(), names_to = "characteristic", values_to = "state_val"),
+    by = "characteristic"
+  ) %>%
+  mutate(
+    pct_dev = (county_val - state_val) / state_val * 100,
+    # Fix factor order to match lollipop (ordered by delta_SIR)
+    county_code = factor(county_code,
+                         levels = top_movers$county_code[order(top_movers$delta_SIR)]),
+    characteristic = factor(characteristic, levels = chars)
+  ) %>%
+  left_join(county_names, by = "county_code")
+
+profile_long$NAME <- factor(
+  profile_long$NAME,
+  levels = top_movers$NAME[order(top_movers$delta_SIR)]
+)
+
+# ── 5. Left panel: lollipop ───────────────────────────────────────────────────
+lollipop_data <- top_movers %>%
+  mutate(NAME = factor(NAME, levels = NAME[order(delta_SIR)]))
+
+p_lollipop <- ggplot(lollipop_data,
+                     aes(x = delta_SIR, y = NAME, color = direction)) +
+  geom_segment(aes(x = 0, xend = delta_SIR, y = NAME, yend = NAME),
+               linewidth = 1.1) +
+  geom_point(size = 3.5) +
+  geom_vline(xintercept = 0, linetype = "dashed",
+             color = "grey50", linewidth = 0.5) +
+  scale_color_manual(
+    values = c("Worsened (2018\u21922023)" = "#D6604D",
+               "Improved (2018\u21922023)" = "#2166AC"),
+    name = NULL) +
+  labs(title    = "\u0394 Adjusted SIR",
+       subtitle = "2018 \u2192 2023",
+       x = "\u0394 Adj. SIR", y = NULL) +
+  theme_minimal(base_size = 10) +
+  theme(legend.position      = "bottom",
+        plot.title           = element_text(face = "bold", hjust = 0.5),
+        plot.subtitle        = element_text(hjust = 0.5, color = "grey40", size = 8),
+        panel.grid.major.y   = element_line(color = "grey93"),
+        axis.text.y          = element_text(size = 8))
+
+# ── 6. Right panel: profile heatmap ──────────────────────────────────────────
+p_heatmap <- ggplot(profile_long,
+                    aes(x = characteristic, y = NAME, fill = pct_dev)) +
+  geom_tile(color = "white", linewidth = 0.4) +
+  geom_text(aes(label = round(county_val, 1)), size = 2.4, color = "grey20") +
+  scale_fill_gradient2(
+    low      = "#2166AC",
+    mid      = "#F7F7F7",
+    high     = "#D6604D",
+    midpoint = 0,
+    name     = "% deviation\nfrom TX avg",
+    limits   = c(-100, 100),
+    oob      = scales::squish
+  ) +
+  labs(title    = "County Population Profile",
+       subtitle = "Cell value = county mean/median; colour = deviation from TX statewide avg",
+       x = NULL, y = NULL) +
+  theme_minimal(base_size = 10) +
+  theme(plot.title         = element_text(face = "bold", hjust = 0.5),
+        plot.subtitle      = element_text(hjust = 0.5, color = "grey40", size = 7),
+        axis.text.y        = element_blank(),   # shared y-axis with lollipop
+        axis.ticks.y       = element_blank(),
+        panel.grid         = element_blank(),
+        legend.title       = element_text(size = 7),
+        legend.text        = element_text(size = 7))
+
+# ── 7. Combine with patchwork ─────────────────────────────────────────────────
+p_lollipop + p_heatmap +
+  plot_layout(widths = c(1.4, 1), guides = "collect") +
+  plot_annotation(
+    title   = paste0("Top ", n_top,
+                     " Counties by Change in Risk-Adjusted SIR (2018\u20232023) ",
+                     "and Their Population Profiles"),
+    caption = paste0(
+      "Lollipop: \u0394 adjusted SIR (2023 \u2212 2018). ",
+      "Heatmap: county-level mean/median for each characteristic across all years; ",
+      "blue = below TX average, red = above TX average. ",
+      "Characteristics derived from HMDA application-level data pooled across 2018\u20132023."),
+    theme = theme(
+      plot.title   = element_text(hjust = 0.5, face = "bold", size = 11),
+      plot.caption = element_text(size = 7, hjust = 0)
+    )
+  ) &
+  theme(legend.position = "bottom")
+```
+
+
+---
+
+# Verification — Does minority population % predict SIR?
+#
+# Before writing the abstract claim, check empirically:
+# 1. Is minority population % positively associated with UNADJUSTED SIR?
+# 2. Does that association survive after credit risk adjustment (ADJUSTED SIR)?
+#    If yes → structural discrimination story holds.
+#    If the relationship collapses after adjustment → credit risk explains it.
+# 3. Print Pearson r and Spearman ρ so you have numbers for the narrative.
+
+```{r minority_sir_check, fig.height=5, fig.width=12, message=FALSE, warning=FALSE}
+
+# ── 1. County-level average minority population % (from application-level data) ──
+county_minority <- df_3 %>%
+  mutate(county_code = as.character(county_code)) %>%
+  group_by(county_code) %>%
+  summarise(
+    minority_pct = mean(as.numeric(tract_minority_population_percent), na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# ── 2. Build combined data frame: unadjusted & adjusted SIR + minority % ─────────
+build_sir_minority <- function(sir_unadj, sir_adj, yr) {
+  sir_unadj %>%
+    dplyr::select(county_code, SIR_unadj = SIR) %>%
+    left_join(sir_adj %>% dplyr::select(county_code, SIR_adj = adj_SIR),
+              by = "county_code") %>%
+    left_join(county_minority, by = "county_code") %>%
+    left_join(county_names,   by = "county_code") %>%
+    filter(!is.na(minority_pct), !is.na(SIR_unadj), !is.na(SIR_adj)) %>%
+    # Cap extreme outliers for plotting (still counted in correlation)
+    mutate(
+      SIR_unadj_plot = pmin(SIR_unadj, 5),
+      SIR_adj_plot   = pmin(SIR_adj,   5),
+      year = as.character(yr)
+    )
+}
+
+d18 <- build_sir_minority(sir_18, adj_sir_18, 2018)
+d23 <- build_sir_minority(sir_23, adj_sir_23, 2023)
+d_all <- bind_rows(d18, d23)
+
+# ── 3. Correlation statistics (printed to console) ───────────────────────────────
+for (yr_lbl in c("2018", "2023")) {
+  d <- d_all %>% filter(year == yr_lbl)
+  cat(sprintf("\n=== %s ===\n", yr_lbl))
+  cat(sprintf(
+    "Unadjusted SIR  vs minority %%:  Pearson r = %.3f  |  Spearman ρ = %.3f\n",
+    cor(d$SIR_unadj,  d$minority_pct, use = "complete.obs", method = "pearson"),
+    cor(d$SIR_unadj,  d$minority_pct, use = "complete.obs", method = "spearman")
+  ))
+  cat(sprintf(
+    "Adjusted SIR    vs minority %%:  Pearson r = %.3f  |  Spearman ρ = %.3f\n",
+    cor(d$SIR_adj,    d$minority_pct, use = "complete.obs", method = "pearson"),
+    cor(d$SIR_adj,    d$minority_pct, use = "complete.obs", method = "spearman")
+  ))
+}
+
+# ── 4. Scatter plots: minority % on x-axis, SIR on y-axis ────────────────────────
+make_minority_scatter <- function(d, yr_lbl) {
+  # Label notable counties: high SIR or high minority %
+  d <- d %>%
+    mutate(label = ifelse(SIR_unadj_plot >= 1.8 | SIR_adj_plot >= 1.8 |
+                            minority_pct >= 70, NAME, NA))
+
+  p_unadj <- ggplot(d, aes(x = minority_pct, y = SIR_unadj_plot)) +
+    geom_hline(yintercept = 1, linetype = "dotted", color = "grey60") +
+    geom_point(alpha = 0.65, color = "#4575B4", size = 2) +
+    geom_smooth(method = "lm", se = TRUE, color = "#D73027",
+                linewidth = 0.8, fill = "#FDAE61", alpha = 0.2) +
+    ggrepel::geom_text_repel(aes(label = label), size = 2.3,
+                              max.overlaps = 12, segment.color = "grey60") +
+    scale_y_continuous(labels = function(x) ifelse(x == 5, "≥5", x)) +
+    labs(title    = paste0(yr_lbl, ": Unadjusted SIR"),
+         subtitle = paste0("r = ",
+           round(cor(d$SIR_unadj, d$minority_pct,
+                     use = "complete.obs", method = "pearson"), 2)),
+         x = "Minority Population (%)", y = "Unadjusted SIR") +
+    theme_minimal(base_size = 10) +
+    theme(plot.title    = element_text(face = "bold", hjust = 0.5),
+          plot.subtitle = element_text(hjust = 0.5, color = "grey40", size = 9))
+
+  p_adj <- ggplot(d, aes(x = minority_pct, y = SIR_adj_plot)) +
+    geom_hline(yintercept = 1, linetype = "dotted", color = "grey60") +
+    geom_point(alpha = 0.65, color = "#D6604D", size = 2) +
+    geom_smooth(method = "lm", se = TRUE, color = "#4575B4",
+                linewidth = 0.8, fill = "#92C5DE", alpha = 0.2) +
+    ggrepel::geom_text_repel(aes(label = label), size = 2.3,
+                              max.overlaps = 12, segment.color = "grey60") +
+    scale_y_continuous(labels = function(x) ifelse(x == 5, "≥5", x)) +
+    labs(title    = paste0(yr_lbl, ": Risk-Adjusted SIR"),
+         subtitle = paste0("r = ",
+           round(cor(d$SIR_adj, d$minority_pct,
+                     use = "complete.obs", method = "pearson"), 2)),
+         x = "Minority Population (%)", y = "Adjusted SIR") +
+    theme_minimal(base_size = 10) +
+    theme(plot.title    = element_text(face = "bold", hjust = 0.5),
+          plot.subtitle = element_text(hjust = 0.5, color = "grey40", size = 9))
+
+  list(unadj = p_unadj, adj = p_adj)
+}
+
+plots_18 <- make_minority_scatter(d18, "2018")
+plots_23 <- make_minority_scatter(d23, "2023")
+
+# Layout: unadjusted 2018 | adjusted 2018 | unadjusted 2023 | adjusted 2023
+(plots_18$unadj + plots_18$adj + plots_23$unadj + plots_23$adj) +
+  plot_layout(ncol = 4) +
+  plot_annotation(
+    title   = "Minority Population Share vs SIR — Before and After Credit Risk Adjustment",
+    caption = paste0("Each point = one Texas county. Red/blue line = OLS fit with 95% CI. ",
+                     "Counties with SIR > 5 shown at 5 for scale. r = Pearson correlation."),
+    theme   = theme(plot.title   = element_text(hjust = 0.5, face = "bold", size = 12),
+                    plot.caption = element_text(size = 7, hjust = 0))
+  )
+```
+
+
+#
+
+# there were no outliers - after some preprocessing
+
+```{r figure5_sir_adjusted_no_outliers, fig.height=5, fig.width=10}
+
+# Outlier thresholds per manuscript:
+# 2018: Winkler (134), Madison (46), Jim Wells (17), Bandera (16) — exclude SIR > 10
+# 2023: 8 counties exceeded SIR of 10 — exclude SIR > 10
+outlier_threshold <- 10
+
+adj_sir_18_clean <- adj_sir_18 %>% filter(adj_SIR <= outlier_threshold)
+adj_sir_23_clean <- adj_sir_23 %>% filter(adj_SIR <= outlier_threshold)
+
+map_adj_18_clean <- tx_counties %>%
+  left_join(adj_sir_18_clean, by = "county_code")
+map_adj_23_clean <- tx_counties %>%
+  left_join(adj_sir_23_clean, by = "county_code")
+
+clean_range <- range(c(adj_sir_18_clean$adj_SIR, adj_sir_23_clean$adj_SIR), na.rm = TRUE)
+
+# Figure 5 — without outliers; manuscript shows 2023 on left, 2018 on right
+p5a <- plot_adj_map(map_adj_23_clean, "Adj. SIR - 2023 (outliers removed)")
+p5b <- plot_adj_map(map_adj_18_clean, "Adj. SIR - 2018 (outliers removed)")
+
+p5b + p5a + plot_layout(ncol = 2)
+```
+
+
+---
+
+# Appendix A3 — Denial Rates by Race and Income
+
+```{r appendixA3_denial_by_race_income, fig.height=8, fig.width=12}
+
+# ── Panel A: Denial rate by Race and Year ────────────────────────────────────
+race_denial <- df_3 %>%
+  filter(race != "Missing") %>%
+  group_by(activity_year, race) %>%
+  summarise(denial_rate = mean(denied) * 100, .groups = "drop") %>%
+  mutate(activity_year = as.integer(as.character(activity_year)))
+
+race_order <- c("Non-Hispanic White", "Hispanic White", "Asian",
+                "Black or African American", "Other Minority Races", "Joint")
+
+race_denial$race <- factor(race_denial$race, levels = race_order)
+
+p_race <- ggplot(race_denial, aes(x = activity_year, y = denial_rate,
+                                   color = race, group = race)) +
+  geom_line(size = 1) +
+  geom_point(size = 2.5) +
+  scale_color_brewer(palette = "Set1", name = "Race") +
+  scale_x_continuous(breaks = 2018:2023) +
+  labs(title = "Denial Rate by Race (2018–2023)",
+       x = "Year", y = "Denial Rate (%)") +
+  theme_minimal(base_size = 10) +
+  theme(legend.position = "bottom",
+        plot.title = element_text(hjust = 0.5, face = "bold"))
+
+# ── Correct income bin order (matches cut() breaks, low → high) ───────────────
+income_bin_order <- c("[0,50]", "(50,100]", "(100,150]", "(150,200]",
+                      "(200,300]", "(300,400]", "(400,500]", "(500,600]",
+                      "(600,1e+03]", "(1e+03,2e+03]", "(2e+03,Inf]")
+
+# ── Panel B: Denial rate by Income Bin and Year ───────────────────────────────
+income_denial <- df_3 %>%
+  group_by(activity_year, income_bins) %>%
+  summarise(denial_rate = mean(denied) * 100, .groups = "drop") %>%
+  mutate(activity_year = as.integer(as.character(activity_year))) %>%
+  filter(!is.na(income_bins)) %>%
+  mutate(income_bins = factor(income_bins, levels = income_bin_order))
+
+p_income <- ggplot(income_denial, aes(x = activity_year, y = denial_rate,
+                                       color = income_bins, group = income_bins)) +
+  geom_line(size = 1) +
+  geom_point(size = 2.5) +
+  scale_color_viridis_d(name = "Income Bin (k)", option = "D") +
+  scale_x_continuous(breaks = 2018:2023) +
+  labs(title = "Denial Rate by Income Bin (2018–2023)",
+       x = "Year", y = "Denial Rate (%)") +
+  theme_minimal(base_size = 10) +
+  theme(legend.position = "bottom",
+        plot.title = element_text(hjust = 0.5, face = "bold"))
+
+# ── Panel C: Denial rate by Race × Income bin (most recent year, 2023) ────────
+# Only show the five lowest income bins where most applicants are concentrated
+panel_c_bins <- income_bin_order
+
+race_income_23 <- df_3 %>%
+  filter(activity_year == 2023, race != "Missing",
+         income_bins %in% panel_c_bins) %>%
+  group_by(race, income_bins) %>%
+  summarise(denial_rate = mean(denied) * 100, n = n(), .groups = "drop") %>%
+  filter(n >= 20) %>%
+  mutate(
+    race       = factor(race,       levels = race_order),
+    income_bins = factor(income_bins, levels = panel_c_bins)   # explicit low→high order
+  )
+
+p_race_income <- ggplot(race_income_23,
+                        aes(x = income_bins, y = denial_rate, fill = race)) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.7) +
+  scale_fill_brewer(palette = "Set1", name = "Race") +
+  labs(title = "Denial Rate by Race × Income Bin (2023)",
+       x = "Income Bin (k)", y = "Denial Rate (%)") +
+  theme_minimal(base_size = 10) +
+  theme(legend.position = "bottom",
+        axis.text.x     = element_text(angle = 30, hjust = 1),
+        plot.title      = element_text(hjust = 0.5, face = "bold"))
+
+# Combine all three panels
+(p_race + p_income) / p_race_income + plot_layout(heights = c(1, 1.2))
+```
+
+
+---
+
+# Appendix A4 — EDA: County Characteristics by SIR Category
+#
+# Supports the claim: "Counties with persistently lower SIRs tend to have lower
+# median property values, newer housing units, and higher proportions of minority
+# residents. Minority applicants in these counties experience lower denial rates."
+#
+# Layout:
+#   Four box plots (one per characteristic), each faceted by SIR type
+#   (Unadjusted vs Risk-Adjusted) with 2018 and 2023 overlaid as fill.
+#   A fifth panel shows minority applicant denial rates across the same groups.
+
+```{r appendix_a4_sir_eda, fig.height=12, fig.width=13, message=FALSE, warning=FALSE}
+
+# ── 1. County-level characteristics from individual applications ──────────────
+county_chars_eda <- df_3 %>%
+  mutate(
+    county_code      = as.character(county_code),
+    activity_year    = as.integer(as.character(activity_year)),
+    property_val_k   = as.numeric(property_value) / 1000,
+    housing_age      = as.numeric(tract_median_age_of_housing_units),
+    minority_pct     = as.numeric(tract_minority_population_percent),
+    is_minority      = race %in% c("Black or African American", "Hispanic White",
+                                    "Asian", "Other Minority Races")
+  ) %>%
+  filter(activity_year %in% c(2018, 2023)) %>%
+  group_by(county_code, activity_year) %>%
+  summarise(
+    median_prop_val    = median(property_val_k,  na.rm = TRUE),
+    median_housing_age = median(housing_age,     na.rm = TRUE),
+    mean_minority_pct  = mean(minority_pct,      na.rm = TRUE),
+    minority_denial_rt = mean(denied[is_minority], na.rm = TRUE) * 100,
+    n_minority         = sum(is_minority),
+    .groups = "drop"
+  ) %>%
+  # exclude counties with fewer than 10 minority applicants (unstable rates)
+  mutate(minority_denial_rt = ifelse(n_minority < 10, NA, minority_denial_rt))
+
+# ── 2. Stack unadjusted and adjusted SIR for both years ──────────────────────
+sir_stack <- bind_rows(
+  sir_18     %>% mutate(year = 2018L, sir_type = "Unadjusted") %>%
+    dplyr::select(county_code, year, sir_type, SIR),
+  sir_23     %>% mutate(year = 2023L, sir_type = "Unadjusted") %>%
+    dplyr::select(county_code, year, sir_type, SIR),
+  adj_sir_18 %>% mutate(year = 2018L, sir_type = "Risk-Adjusted", SIR = adj_SIR) %>%
+    dplyr::select(county_code, year, sir_type, SIR),
+  adj_sir_23 %>% mutate(year = 2023L, sir_type = "Risk-Adjusted", SIR = adj_SIR) %>%
+    dplyr::select(county_code, year, sir_type, SIR)
+)
+
+# ── 3. SIR categories (three bands centred on 1) ─────────────────────────────
+sir_cat_levels <- c("Low (< 0.75)", "Medium (0.75\u20131.25)", "High (> 1.25)")
+
+sir_stack <- sir_stack %>%
+  mutate(
+    SIR_cat  = case_when(
+      SIR <  0.75 ~ "Low (< 0.75)",
+      SIR <= 1.25 ~ "Medium (0.75\u20131.25)",
+      SIR >  1.25 ~ "High (> 1.25)",
+      TRUE        ~ NA_character_
+    ),
+    SIR_cat  = factor(SIR_cat,  levels = sir_cat_levels),
+    sir_type = factor(sir_type, levels = c("Unadjusted", "Risk-Adjusted")),
+    year     = as.integer(as.character(year))  # keep integer for join; convert to factor after
+  )
+
+# ── 4. Join with county characteristics, then convert year to factor for plots ─
+eda_full <- sir_stack %>%
+  left_join(county_chars_eda, by = c("county_code", "year" = "activity_year")) %>%
+  filter(!is.na(SIR_cat)) %>%
+  mutate(year = factor(year))
+
+# ── 5. Shared theme and palette ───────────────────────────────────────────────
+yr_colors  <- c("2018" = "#4575B4", "2023" = "#D73027")
+box_theme  <- theme_minimal(base_size = 10) +
+  theme(
+    legend.position    = "bottom",
+    # Solid border around each facet panel — creates a clear box per SIR type
+    panel.border       = element_rect(colour = "grey30", fill = NA, linewidth = 1),
+    # Coloured strip header so Unadjusted and Risk-Adjusted are immediately distinct
+    strip.background   = element_rect(fill = "#D9E8F5", colour = "grey30", linewidth = 1),
+    strip.text         = element_text(face = "bold", size = 9, colour = "grey10"),
+    # Extra horizontal breathing room between the two facets
+    panel.spacing.x    = unit(1.2, "lines"),
+    axis.text.x        = element_text(size = 8),
+    plot.title         = element_text(face = "bold", hjust = 0.5, size = 10),
+    panel.grid.major.x = element_blank()
+  )
+
+make_box <- function(data, y_var, y_label, title_text, y_cap = NULL) {
+  p <- ggplot(data, aes(x = SIR_cat, y = .data[[y_var]], fill = year)) +
+    geom_boxplot(outlier.size = 0.8, outlier.alpha = 0.4,
+                 position = position_dodge(0.8), width = 0.65, alpha = 0.85) +
+    facet_wrap(~sir_type, ncol = 2) +
+    scale_fill_manual(values = yr_colors, name = "Year") +
+    labs(title = title_text, x = "SIR Category", y = y_label) +
+    box_theme
+
+  if (!is.null(y_cap))
+    p <- p + coord_cartesian(ylim = c(0, y_cap))
+  p
+}
+
+# ── 6. Individual panels ──────────────────────────────────────────────────────
+
+p_propval <- make_box(eda_full, "median_prop_val",
+                      "Median Property Value (k)",
+                      "A. Property Value by SIR Category",
+                      y_cap = 1500)
+
+p_age     <- make_box(eda_full, "median_housing_age",
+                      "Median Age of Housing Units (yrs)",
+                      "B. Housing Age by SIR Category",
+                      y_cap = 60)
+
+p_minpct  <- make_box(eda_full, "mean_minority_pct",
+                      "Minority Population (%)",
+                      "C. Minority Population Share by SIR Category")
+
+p_mindenial <- make_box(
+  eda_full %>% filter(!is.na(minority_denial_rt)),
+  "minority_denial_rt",
+  "Denial Rate - Minority Applicants (%)",
+  "D. Minority Applicant Denial Rate by SIR Category",
+  y_cap = 60
+)
+
+# ── 7. Combine all four panels ────────────────────────────────────────────────
+(p_propval + p_age) / (p_minpct + p_mindenial) +
+  plot_layout(guides = "collect") +
+  plot_annotation(
+    title   = paste0("County Characteristics and Minority Denial Rates ",
+                     "by SIR Category - 2018 and 2023"),
+    # caption = paste0(
+    #   "Each box = distribution across Texas counties in that SIR band. ",
+    #   "Left facet = unadjusted SIR; right facet = risk-adjusted SIR. ",
+    #   "Panel D excludes counties with fewer than 10 minority applicants. ",
+    #   "Property values capped at $1.5M; housing age capped at 60 yrs for readability. ",
+    #   "SIR categories: Low < 0.75 (below statewide average), ",
+    #   "Medium 0.75\u20131.25 (near average), High > 1.25 (above average)."),
+    theme = theme(
+      plot.title   = element_text(hjust = 0.5, face = "bold", size = 12),
+      plot.caption = element_text(size = 7, hjust = 0),
+      legend.position = "bottom"
+    )
+  ) &
+  theme(legend.position = "bottom")
+```
+
+
+# Appendix A4b — Persistence: Counties Consistently Low vs High SIR (Both Years)
+#
+# Isolates counties that are *persistently* low (SIR < 0.75 in BOTH 2018 and 2023)
+# vs persistently high (SIR > 1.25 in BOTH years) and compares their profiles
+# directly — the strongest evidence for the "persistently lower" claim.
+
+```{r appendix_a4b_persistence, fig.height=6, fig.width=13, message=FALSE, warning=FALSE}
+
+classify_persistent <- function(sir_df_18, sir_df_23, sir_col = "SIR") {
+  sir_df_18 %>%
+    dplyr::select(county_code, SIR_18 = all_of(sir_col)) %>%
+    inner_join(
+      sir_df_23 %>% dplyr::select(county_code, SIR_23 = all_of(sir_col)),
+      by = "county_code"
+    ) %>%
+    mutate(
+      persistence = case_when(
+        SIR_18 < 0.75 & SIR_23 < 0.75  ~ "Persistently Low\n(both years < 0.75)",
+        SIR_18 > 1.25 & SIR_23 > 1.25  ~ "Persistently High\n(both years > 1.25)",
+        TRUE                             ~ "Variable / Middle"
+      )
+    ) %>%
+    filter(persistence != "Variable / Middle")
+}
+
+persist_unadj <- classify_persistent(sir_18, sir_23, "SIR") %>%
+  mutate(sir_type = "Unadjusted")
+
+persist_adj   <- classify_persistent(
+  adj_sir_18 %>% rename(SIR = adj_SIR),
+  adj_sir_23 %>% rename(SIR = adj_SIR),
+  "SIR"
+) %>%
+  mutate(sir_type = "Risk-Adjusted")
+
+persist_all <- bind_rows(persist_unadj, persist_adj) %>%
+  mutate(sir_type = factor(sir_type, levels = c("Unadjusted", "Risk-Adjusted")))
+
+# Get 2023 county characteristics for persistent counties
+persist_chars <- persist_all %>%
+  left_join(county_chars_eda %>% filter(activity_year == 2023),
+            by = "county_code") %>%
+  filter(!is.na(median_prop_val)) %>%
+  mutate(persistence = factor(persistence,
+    levels = c("Persistently Low\n(both years < 0.75)",
+               "Persistently High\n(both years > 1.25)")))
+
+persist_colors <- c(
+  "Persistently Low\n(both years < 0.75)"  = "#2166AC",
+  "Persistently High\n(both years > 1.25)" = "#D6604D"
+)
+
+make_persist_box <- function(y_var, y_label, title_text, y_cap = NULL) {
+  p <- ggplot(persist_chars,
+              aes(x = persistence, y = .data[[y_var]], fill = persistence)) +
+    geom_boxplot(outlier.size = 0.9, outlier.alpha = 0.5,
+                 width = 0.5, alpha = 0.85, show.legend = FALSE) +
+    geom_jitter(width = 0.12, size = 1, alpha = 0.4, color = "grey30") +
+    facet_wrap(~sir_type, ncol = 2) +
+    scale_fill_manual(values = persist_colors) +
+    labs(title = title_text, x = NULL, y = y_label) +
+    box_theme +
+    theme(axis.text.x = element_text(size = 8, lineheight = 0.85))
+
+  if (!is.null(y_cap))
+    p <- p + coord_cartesian(ylim = c(0, y_cap))
+  p
+}
+
+pp1 <- make_persist_box("median_prop_val",    "Median Property Value (k)",
+                        "A. Property Value",   y_cap = 1500)
+pp2 <- make_persist_box("median_housing_age",  "Median Housing Age (yrs)",
+                        "B. Housing Age",       y_cap = 60)
+pp3 <- make_persist_box("mean_minority_pct",   "Minority Population (%)",
+                        "C. Minority Share")
+pp4 <- make_persist_box("minority_denial_rt",  "Minority Denial Rate (%)",
+                        "D. Minority Denial Rate", y_cap = 60)
+
+(pp1 + pp2 + pp3 + pp4) +
+  plot_layout(ncol = 4) +
+  plot_annotation(
+    title   = "Persistently Low vs High SIR Counties: Population and Lending Profiles (2023)",
+    caption = paste0(
+      "Only counties classified as persistently low (SIR < 0.75 in both 2018 and 2023) ",
+      "or persistently high (SIR > 1.25 in both years) are shown. ",
+      "Left facet = based on unadjusted SIR; right = risk-adjusted SIR. ",
+      "Dots show individual county values overlaid on box plots."),
+    theme = theme(
+      plot.title   = element_text(hjust = 0.5, face = "bold", size = 11),
+      plot.caption = element_text(size = 7, hjust = 0)
+    )
+  )
+```

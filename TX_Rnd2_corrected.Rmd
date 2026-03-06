@@ -1,0 +1,727 @@
+---
+title: "TX – Corrected Analysis (aligned with manuscript)"
+author: "Victoria"
+date: "2024-10-28"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+setwd('/Users/victoria/Library/CloudStorage/OneDrive-BowlingGreenStateUniversity/BGSU/PhDing/MortgageAnalysis')
+
+## Package names
+## FIX 1: Added 'glmnet' to package list (required for LASSO as described in manuscript Section 3.2)
+packages <- c('data.table', "conflicted", "car", "forcats", "readr", "tidyverse",
+              "tinytex", "datasets", "papaja", "here", "DBI", "RSQLite", "maps",
+              "usmap", "stringr", "dplyr", "dbplyr", "knitr", "kableExtra",
+              "forcats", "parallel", "psych", "crunch", "glmnet")
+
+## Install packages not yet installed
+installed_packages <- packages %in% rownames(installed.packages())
+if (any(installed_packages == FALSE)) {
+  install.packages(packages[!installed_packages])
+}
+
+## Packages loading
+invisible(lapply(packages, library, character.only = TRUE))
+conflicts_prefer(dplyr::filter())
+conflicts_prefer(crunch::combine)
+conflicts_prefer(car::recode)
+
+data_18 <- fread('state_TX_2018.csv')
+data_19 <- fread('state_TX_2019.csv')
+data_20 <- fread('state_TX_2020.csv')
+data_21 <- fread('state_TX_2021.csv')
+data_22 <- fread('state_TX_2022.csv')
+data_23 <- fread('state_TX_2023.csv')
+
+# Combine all the data tables into one
+merged_data <- rbindlist(list(data_18, data_19, data_20, data_21, data_22, data_23),
+                         use.names = TRUE, fill = TRUE)
+
+varnums <- function(x) {
+  w <- as.data.frame(c(1:length(colnames(x))), paste0('# ', colnames(x)))
+  names(w) <- c("# Var/Pos")
+  w
+}
+```
+
+
+# Redefine Columns
+
+```{r data}
+remove_cols <- function(df) {
+  w <- df %>%
+    filter(loan_term == "360" &
+           lien_status == 1 &
+           construction_method == 1 &
+           business_or_commercial_purpose == 2 &
+           total_units == 1 &
+           loan_purpose == 1 &
+           occupancy_type == 1 &
+           conforming_loan_limit == "C" &
+           derived_race != "Free Form Text Only")
+  w
+}
+
+df <- remove_cols(merged_data)
+
+df <- df[, -c(7, 9, 17, 18, 19, 21, 24:38, 40, 41:44, 45, 51:59, 63:66, 68:73, 76, 77, 80:83, 85:88, 92)]
+
+df[, c(1:15, 21:35)] <- lapply(df[, c(1:15, 21:35)], factor)
+
+## FIX 2: Filter out action_taken values 7 and 8 as before
+df <- df %>%
+  filter(!(action_taken %in% c("7", "8")))
+
+df$derived_action_taken <- recode(df$action_taken,
+  'c("1","6") = "Approved"; c("2", "3") = "Denied"; else = "Withdrawn/Incomplete"')
+
+## FIX 2 (continued): Manuscript Section 3.1 states "Only completed applications —
+## those neither withdrawn nor closed for incompleteness — are retained."
+## The original code did NOT filter out Withdrawn/Incomplete before modelling.
+## This step removes those rows so that the model uses only Approved vs. Denied.
+df <- df %>%
+  filter(derived_action_taken %in% c("Approved", "Denied"))
+
+df$derived_applicant_sex <- recode(df$applicant_sex,
+  'c("1") = "Male"; c("2") = "Female"; c("4") = "Not Applicable"; else = "Other"')
+
+df$derived_co_applicant_sex <- recode(df$`co-applicant_sex`,
+  'c("1") = "Male"; c("2") = "Female"; c("4") = "Not Applicable";
+   c("5") = "No_Coapplicant"; else = "Other"')
+
+df$denial_reason_1 <- recode(df$`denial_reason-1`,
+  'c("1") = "DTI ratio"; c("2") = "Emplmnt hist"; c("3") = "Credit Hist";
+   c("4") = "Collateral"; c("5") = "Insuf Cash"; c("6") = "Unverifieable";
+   c("7") = "Incomplete Appl"; c("8") = "Insurance Denied";
+   c("1111") = "Exempt"; c("10") = "NA"; else = "Other"')
+
+desired_order_age_applicant <- c('<25', '25-34', '35-44', '45-54', '55-64', '65-74', '>74', '8888')
+df$applicant_age <- factor(df$applicant_age, levels = desired_order_age_applicant)
+
+# Race coding
+df <- df %>%
+  mutate(race = ifelse(
+    derived_ethnicity == "Joint" | derived_race == "Joint" |
+      derived_sex == "Joint" | derived_co_applicant_sex %in% c(1, 2, 6),
+    "Joint",
+    ifelse(derived_ethnicity == "Hispanic or Latino" &
+             (`applicant_race-1` %in% c(5, 6, 7) |
+              derived_race %in% c("White", "Race Not Available")),
+           "Hispanic White",
+           ifelse(`applicant_race-1` %in% c(2, 27) | derived_race == "Asian",
+                  "Asian",
+                  ifelse(derived_ethnicity == "Not Hispanic or Latino" &
+                           (`applicant_race-1` %in% c(5, 6, 7) |
+                            derived_race == "White") | derived_race == "White",
+                         "Non-Hispanic White",
+                         ifelse((`applicant_race-1` %in% c(1, 4, 21:26, 41:43) |
+                                   derived_race %in% c("2 or more minority races",
+                                                        "American Indian or Alaska Native",
+                                                        "Native Hawaiian or Other Pacific Islander")),
+                                "Other Minority Races",
+                                ifelse(`applicant_race-1` == 3 |
+                                         derived_race == "Black or African American",
+                                       "Black or African American", "Missing")))))))
+```
+
+
+# Table 1 — Application Profile by Demography
+
+Reproduces manuscript Table 1. Uses `df` (completed applications, before NA removal)
+so application counts match the per-year totals reported in the manuscript.
+
+```{r table1}
+race_order_t1 <- c("Asian", "Black or African American", "Hispanic White",
+                   "Joint", "Missing", "Non-Hispanic White", "Other Minority Races")
+
+table1 <- df_3 %>%
+  mutate(race = factor(race, levels = race_order_t1)) %>%
+  group_by(activity_year, race) %>%
+  summarise(
+    Applications = n(),
+    Denials      = sum(derived_action_taken == "Denied"),
+    .groups      = "drop"
+  ) %>%
+  group_by(activity_year) %>%
+  mutate(
+    `I (%)`           = paste0(round(Applications / sum(Applications) * 100, 2), "%"),
+    `III (Denial Rate)` = paste0(round(Denials / Applications * 100, 2), "%")
+  ) %>%
+  ungroup() %>%
+  rename(
+    `Year`         = activity_year,
+    `Race`         = race,
+    `II (Denials)` = Denials
+  ) %>%
+  dplyr::select(Year, Race, Applications, `I (%)`, `II (Denials)`, `III (Denial Rate)`) %>%
+  arrange(Year, Race)
+
+kable(table1,
+      caption  = "Table 1: Application Profile by Demography",
+      booktabs = TRUE,
+      longtable = TRUE,
+      align    = c("l","l","r","r","r","r")) %>%
+  kable_styling(latex_options = c("repeat_header", "hold_position"),
+                font_size = 9) %>%
+  collapse_rows(columns = 1, valign = "top")
+```
+
+
+# Select features to begin with
+
+Here, I choose to retain variables used in the initial model.
+
+```{r}
+df_2 <- df %>%
+  dplyr::select(-c(2:4, 12:13, 22:27, 31, 32, 34, 35))
+```
+
+# Remove NA values in income, DTI, LTV
+
+```{r}
+df_3 <- df_2 %>%
+  filter(income != 'NA')
+df_3 <- df_2 %>%
+  filter(income != 0)
+df_3 <- na.omit(df_3)
+
+df_3[, c(12:14, 21:27)] <- as.data.frame(lapply(df_3[, c(12:14, 21:27)], as.numeric))
+```
+
+
+# More variables
+
+```{r}
+df_3$income_bins <- cut(df_3$income,
+  breaks = c(0, 50, 100, 150, 200, 300, 400, 500, 600, 1000, 2000, Inf),
+  include.lowest = TRUE)
+df_3$log_income <- log(df_3$income)
+
+df_3$ltv_bins <- cut(df_3$loan_to_value_ratio,
+  breaks = c(0, 60, 80, 90, 100, 150, Inf),
+  include.lowest = TRUE)
+
+df_3$dti_bins <- ifelse(
+  df_3$debt_to_income_ratio %in% c("<20%", '20%-<30%', '30%-<36%'), '<36%',
+  ifelse(df_3$debt_to_income_ratio %in% c('36','37','38','39','40','41','42'), '36%-42%',
+         ifelse(df_3$debt_to_income_ratio %in% c('43','44','45','46','47','48','49'), '43%-49%',
+                ifelse(df_3$debt_to_income_ratio == '50%-60%', '50%-60%', '>60%'))))
+desired_order_dti <- c('<36%', '36%-42%', '43%-49%', '50%-60%', '>60%')
+df_3$dti_bins <- factor(df_3$dti_bins, levels = desired_order_dti)
+
+df_3$dti_g50 <- ifelse(
+  df_3$debt_to_income_ratio %in% c("<20%", '20%-<30%', '30%-<36%',
+                                    '36','37','38','39','40','41','42',
+                                    '43','44','45','46','47','48','49'),
+  '<50%', '>=50%')
+
+df_3$property_value_thousands <- df_3$property_value / 1000
+df_3$property_value_bins <- cut(df_3$property_value_thousands,
+  breaks = c(0, 200, 400, 500, 1000, 1500, Inf),
+  include.lowest = TRUE)
+
+df_3$loan_amt_thousands <- df_3$loan_amount / 1000
+
+## Reference categories (as specified in manuscript Section 3.2)
+df_3 <- within(df_3, applicant_age       <- relevel(applicant_age,       ref = '35-44'))
+df_3 <- within(df_3, ltv_bins            <- relevel(ltv_bins,            ref = '(90,100]'))
+df_3 <- within(df_3, property_value_bins <- relevel(property_value_bins, ref = '(200,400]'))
+df_3 <- within(df_3, derived_sex         <- relevel(derived_sex,         ref = 'Joint'))
+
+## income_bins: default first level is [0,50]; manuscript reference is (200,300]
+df_3 <- within(df_3, income_bins <- relevel(income_bins, ref = '(200,300]'))
+
+## dti_g50: was a character vector — must be factored before releveling.
+## Manuscript reference is applicants with DTI < 50%.
+df_3$dti_g50 <- factor(df_3$dti_g50)
+df_3 <- within(df_3, dti_g50 <- relevel(dti_g50, ref = '<50%'))
+
+## FIX 3: The original code releveled 'derived_race' (the original HMDA column)
+## but the model formula uses the custom 'race' variable. Those are different columns.
+## Corrected to relevel the custom 'race' variable with reference "Non-Hispanic White",
+## matching manuscript Section 3.2: "Non-Hispanic White applicants (Race)".
+df_3$race <- factor(df_3$race)
+df_3 <- within(df_3, race <- relevel(race, ref = 'Non-Hispanic White'))
+
+df_3 <- df_3[complete.cases(df_3), ]
+
+## FIX 4: Create a proper binary integer outcome variable (1 = Denied, 0 = Approved)
+## as described in manuscript Section 3.2. The original code fed a factor with
+## 3 levels to binomial GLM; this binary column matches the manuscript specification.
+df_3$denied <- as.integer(df_3$derived_action_taken == "Denied")
+```
+
+
+
+```{r}
+df_2018 <- df_3 %>% filter(activity_year == 2018)
+df_2023 <- df_3 %>% filter(activity_year == 2023)
+
+# denied
+denied_18 <- sum(df_2018$denied)/nrow(df_2018)
+denied_23 <- sum(df_2023$denied)/nrow(df_2023)
+
+
+#
+```
+
+# Table 2 — Summary Statistics of Numerical Variables
+
+Reproduces manuscript Table 2. Uses `df_3` (after NA removal), which contains
+1,999,145 observations as reported in the manuscript.
+
+```{r table2}
+num_vars <- c('ffiec_msa_md_median_family_income',
+              'loan_amt_thousands',
+              'log_income',
+              'property_value_thousands',
+              'tract_median_age_of_housing_units',
+              'tract_minority_population_percent',
+              'tract_one_to_four_family_homes',
+              'tract_owner_occupied_units')
+
+var_labels <- c('Median Family Income',
+                'Loan Amount (k)',
+                'Log Income',
+                'Property Value (k)',
+                'Median Housing Age (Yrs)',
+                'Minority Pop. (%)',
+                '1-to-4 Family Homes',
+                'Owner-Occupied Units')
+
+table2 <- do.call(rbind, lapply(seq_along(num_vars), function(i) {
+  x <- as.numeric(df_3[[num_vars[i]]])
+  data.frame(
+    Variable = var_labels[i],
+    Max      = round(max(x,    na.rm = TRUE), 2),
+    Mean     = round(mean(x,   na.rm = TRUE), 2),
+    Median   = round(median(x, na.rm = TRUE), 2),
+    Min      = round(min(x,    na.rm = TRUE), 2),
+    S.D      = round(sd(x,     na.rm = TRUE), 2),
+    stringsAsFactors = FALSE
+  )
+}))
+
+kable(table2,
+      caption  = "Table 2: Summary Statistics of Numerical Variables",
+      booktabs = TRUE,
+      align    = c("l","r","r","r","r","r"),
+      row.names = FALSE) %>%
+  kable_styling(latex_options = c("striped", "hold_position"), font_size = 10) %>%
+  footnote(general = paste0("'k' denotes /000 for Loan Amount and Property Value. ",
+                            "Minority Pop. expressed as a percentage. ",
+                            "N = ", format(nrow(df_3), big.mark = ","), " observations."),
+           general_title = "Note: ", footnote_as_chunk = TRUE)
+```
+
+
+# LASSO penalized binomial regression (per manuscript Section 3.2)
+
+The manuscript describes penalized binomial logistic regression with LASSO
+regularization using the glmnet package (Hastie et al., 2024).
+
+**Original code issue:** The original RMD used a standard stepwise forward-selection
+GLM (`glm()` + `step()`), which does not match the LASSO method described in the
+manuscript. This section replaces that approach with glmnet LASSO.
+
+```{r lasso_models}
+model_list <- list()
+
+# Predictor variables (same set as original formula)
+predictor_vars <- c('loan_amt_thousands', 'ffiec_msa_md_median_family_income',
+                    'income_bins', 'race', 'derived_sex',
+                    'tract_minority_population_percent',
+                    'applicant_age', 'ltv_bins', 'dti_g50', 'property_value_bins')
+
+# Loop through each year
+for (yr in sort(unique(df_3$activity_year))) {
+  yearly_data <- df_3[df_3$activity_year == yr, ]
+
+  # Build model matrix (glmnet requires a numeric matrix)
+  x_matrix <- model.matrix(
+    as.formula(paste("denied ~", paste(predictor_vars, collapse = " + "))),
+    data = yearly_data
+  )[, -1]  # drop intercept column
+
+  y_vector <- yearly_data$denied
+
+  # Cross-validated LASSO to select optimal lambda
+  set.seed(123)
+  cv_fit <- cv.glmnet(x = x_matrix, y = y_vector,
+                      family = "binomial", alpha = 1,
+                      type.measure = "mse", nfolds = 10)
+
+  model_list[[as.character(yr)]] <- cv_fit
+}
+
+
+
+```
+
+
+# Extract significant / non-zero coefficients
+
+```{r results}
+significance_level <- 0.05
+
+results <- data.frame(
+  Year     = character(),
+  Variable = character(),
+  Estimate = numeric(),
+  stringsAsFactors = FALSE
+)
+
+for (yr in names(model_list)) {
+  cv_fit <- model_list[[yr]]
+
+  # Use lambda.min (smallest CV error); lambda.1se gives sparser model
+  coefs <- coef(cv_fit, s = "lambda.min")
+  coef_df <- as.data.frame(as.matrix(coefs))
+  colnames(coef_df) <- "Estimate"
+  coef_df$Variable <- rownames(coef_df)
+  # Drop intercept, zero-shrunk coefficients, and any NA estimates
+  # (NA != 0 returns NA which passes the filter, so !is.na() guard is needed)
+  coef_df <- coef_df[coef_df$Variable != "(Intercept)" &
+                     !is.na(coef_df$Estimate) &
+                     coef_df$Estimate != 0, ]
+
+  if (nrow(coef_df) > 0) {
+    year_results <- data.frame(
+      Year     = yr,
+      Variable = coef_df$Variable,
+      Estimate = coef_df$Estimate
+    )
+    results <- rbind(results, year_results)
+  }
+}
+
+# write.csv(results, "significant_variables_lasso.csv", row.names = FALSE)
+```
+
+
+# Post-LASSO GLM — Significance Testing
+
+LASSO selects variables but does not produce p-values. Following standard
+post-selection inference practice, we refit a standard `glm()` per year using
+only the variables LASSO retained (non-zero at lambda.min). This recovers
+standard errors, z-values, and p-values, allowing significance stars to be
+reported as in manuscript Table 3.
+
+```{r post_lasso_glm}
+
+# Significance stars helper
+sig_stars <- function(p) {
+  case_when(
+    p < 0.001 ~ "***",
+    p < 0.01  ~ "**",
+    p < 0.05  ~ "*",
+    p < 0.1   ~ ".",
+    TRUE       ~ ""
+  )
+}
+
+glm_results <- list()   # full glm objects, one per year
+sig_results <- data.frame(
+  Year      = character(),
+  Variable  = character(),
+  Estimate  = numeric(),
+  StdError  = numeric(),
+  Pvalue    = numeric(),
+  Stars     = character(),
+  stringsAsFactors = FALSE
+)
+
+for (yr in names(model_list)) {
+  cv_fit      <- model_list[[yr]]
+  yearly_data <- df_3[df_3$activity_year == yr, ]
+
+  # Step 1: identify variables LASSO kept (non-zero at lambda.min)
+  lasso_coefs <- coef(cv_fit, s = "lambda.min")
+  kept_vars   <- rownames(lasso_coefs)[
+    !is.na(lasso_coefs[, 1]) &
+    lasso_coefs[, 1] != 0 &
+    rownames(lasso_coefs) != "(Intercept)"
+  ]
+
+  if (length(kept_vars) == 0) next
+
+  # Step 2: map dummy names back to original predictor variable names.
+  # model.matrix expands factors into dummies like "dti_g50>=50%" or
+  # "raceBlack or African American". We recover the base variable name by
+  # checking which predictor_vars each dummy name starts with.
+  # A regex like ([a-z_]+) breaks on variables with digits (e.g. dti_g50).
+  base_vars <- predictor_vars[sapply(predictor_vars, function(v) {
+    any(startsWith(kept_vars, v))
+  })]
+
+  # Build formula from kept base variables
+  glm_formula <- as.formula(
+    paste("denied ~", paste(base_vars, collapse = " + "))
+  )
+
+  # Step 3: refit standard GLM with selected variables
+  glm_fit <- glm(glm_formula, data = yearly_data, family = binomial)
+  glm_results[[yr]] <- glm_fit
+
+  # Step 4: extract coefficients, SE, and p-values
+  coef_summary <- summary(glm_fit)$coefficients
+  year_sig <- data.frame(
+    Year     = yr,
+    Variable = rownames(coef_summary),
+    Estimate = round(coef_summary[, "Estimate"],    3),
+    StdError = round(coef_summary[, "Std. Error"],  3),
+    Pvalue   = round(coef_summary[, "Pr(>|z|)"],    4),
+    Stars    = sig_stars(coef_summary[, "Pr(>|z|)"]),
+    stringsAsFactors = FALSE
+  )
+  sig_results <- rbind(sig_results, year_sig)
+}
+```
+
+
+# Table 3 — LASSO Logistic Regression Coefficients (2018–2023)
+
+Reproduces manuscript Table 3 in wide format (one column per year). LASSO
+shrinks coefficients toward zero rather than producing p-values; non-zero
+coefficients are retained at lambda.min. Cells show the LASSO log-odds
+estimate; zeroed-out coefficients are shown as "—".
+
+```{r table3}
+
+# Clean up variable names to match manuscript row labels
+
+clean_varname <- function(x) {
+  x <- gsub("income_bins",        "Income(K)",        x)
+  x <- gsub("race",               "Race",             x)
+  x <- gsub("derived_sex",        "Sex",              x)
+  x <- gsub("ltv_bins",           "LTV(%)",           x)
+  x <- gsub("applicant_age",      "Age",              x)
+  x <- gsub("dti_g50",            "DTI(%)",           x)
+  x <- gsub("property_value_bins","Property Value(K)", x)
+  x <- gsub("loan_amt_thousands", "Loan Amount(K)",   x)
+  x <- gsub("ffiec_msa_md_median_family_income", "MSA Income", x)
+  x <- gsub("tract_minority_population_percent", "Minority Pop.(%)", x)
+  x
+}
+
+table3_long <- sig_results %>%
+  filter(Variable != "(Intercept)") %>%
+  mutate(
+    Variable    = clean_varname(Variable),
+    # Combine estimate and stars into one cell, e.g. "1.216***"
+    Est_Stars   = paste0(Estimate, Stars)
+  )
+
+table3_wide <- table3_long %>%
+  dplyr::select(Year, Variable, Est_Stars) %>%
+  pivot_wider(names_from = Year, values_from = Est_Stars) %>%
+  arrange(Variable) %>%
+  mutate(across(-Variable, ~ifelse(is.na(.), "—", .)))
+
+# Add intercept row from post-LASSO GLM (includes p-value and stars)
+intercepts <- sig_results %>%
+  filter(Variable == "(Intercept)") %>%
+  mutate(Est_Stars = paste0(Estimate, Stars)) %>%
+  dplyr::select(Year, Variable, Est_Stars)
+
+intercept_wide <- intercepts %>%
+  pivot_wider(names_from = Year, values_from = Est_Stars) %>%
+  mutate(across(-Variable, ~ifelse(is.na(.), "—", .)))
+
+table3_final <- bind_rows(intercept_wide, table3_wide)
+
+kable(table3_final,
+      caption   = "Table 3: LASSO Logistic Regression Coefficients (2018–2023)",
+      booktabs  = TRUE,
+      align     = c("l", rep("r", 6)),
+      row.names = FALSE) %>%
+  kable_styling(latex_options = c("striped", "hold_position", "scale_down"),
+                font_size = 8) %>%
+  footnote(general = paste0("Coefficients are log-odds estimates from a binomial GLM refitted on variables ",
+                            "selected by 10-fold cross-validated LASSO (lambda.min). ",
+                            "A dash (—) indicates the variable was shrunk to zero by LASSO and excluded from the model for that year. ",
+                            "Significance levels: *** p<0.001; ** p<0.01; * p<0.05; . p<0.1. ",
+                            "Reference categories: Non-Hispanic White (Race), Joint (Sex), ",
+                            "35–44 (Age), LTV 90–100%, DTI <50%, Income $200k–$300k, Property Value $200k–$400k."),
+           general_title = "Note: ", footnote_as_chunk = TRUE)
+```
+
+
+# Model accuracy and MSE (per manuscript Section 3.3)
+
+```{r model_fit}
+# NOTE: mean(pred_prob) on the *training* data always equals mean(y_obs) because
+# glmnet does not penalize the intercept — the intercept's optimality condition
+# forces sum(fitted) = sum(observed). To obtain a meaningful predicted denial rate
+# that can differ from the unadjusted rate, we evaluate on a held-out test set.
+
+set.seed(123)
+fit_stats <- data.frame(
+  Year               = character(),
+  Accuracy           = numeric(),
+  MSE                = numeric(),
+  Predicted_Rate_pct = numeric(),   # mean predicted denial prob on TEST set × 100
+  Observed_Rate_pct  = numeric(),   # actual denial rate on TEST set × 100
+  stringsAsFactors   = FALSE
+)
+
+model_list_train <- list()   # retrained models on 80 % split (for out-of-sample eval)
+
+for (yr in names(model_list)) {
+  yearly_data <- df_3[df_3$activity_year == yr, ]
+
+  # 80 / 20 train-test split (same seed → reproducible)
+  n        <- nrow(yearly_data)
+  train_ix <- sample(seq_len(n), size = floor(0.8 * n))
+  train    <- yearly_data[ train_ix, ]
+  test     <- yearly_data[-train_ix, ]
+
+  # Build matrices
+  make_x <- function(dat) {
+    model.matrix(
+      as.formula(paste("denied ~", paste(predictor_vars, collapse = " + "))),
+      data = dat
+    )[, -1]
+  }
+
+  x_train <- make_x(train);  y_train <- train$denied
+  x_test  <- make_x(test);   y_test  <- test$denied
+
+  # Refit LASSO on training fold
+  cv_fit_train <- cv.glmnet(x = x_train, y = y_train,
+                             family = "binomial", alpha = 1,
+                             type.measure = "mse", nfolds = 10)
+  model_list_train[[yr]] <- cv_fit_train
+
+  # Predict on held-out TEST set
+  pred_prob  <- as.vector(predict(cv_fit_train, newx = x_test,
+                                  s = "lambda.min", type = "response"))
+  pred_class <- as.integer(pred_prob >= 0.5)
+
+  accuracy  <- mean(pred_class == y_test)
+  mse       <- mean((y_test - pred_prob)^2)
+  pred_rate <- mean(pred_prob)   # out-of-sample: can differ from observed rate
+  obs_rate  <- mean(y_test)
+
+  fit_stats <- rbind(fit_stats,
+                     data.frame(
+                       Year               = yr,
+                       Accuracy           = round(accuracy  * 100, 2),
+                       MSE                = round(mse,             4),
+                       Predicted_Rate_pct = round(pred_rate * 100, 2),
+                       Observed_Rate_pct  = round(obs_rate  * 100, 2)
+                     ))
+}
+
+# Print full table
+print(fit_stats)
+
+# Quick inline checks for 2018 and 2023
+for (yr in c("2018", "2023")) {
+  row <- fit_stats[fit_stats$Year == yr, ]
+  if (nrow(row) > 0)
+    cat(sprintf(
+      "%s — Accuracy: %.2f%%  |  MSE: %.4f  |  Predicted rate: %.2f%%  |  Observed rate: %.2f%%\n",
+      yr, row$Accuracy, row$MSE, row$Predicted_Rate_pct, row$Observed_Rate_pct))
+}
+
+
+```
+
+
+# Trend plots
+
+```{r trend_plots}
+# Use results from above (or load saved CSV)
+# results <- fread('significant_variables_lasso.csv')
+
+
+income_data         <- results %>% filter(grepl("income_bins",     Variable))
+race_data           <- results %>% filter(grepl("race",            Variable))
+ltv_data            <- results %>% filter(grepl("ltv_bins",        Variable))
+dti_data            <- results %>% filter(grepl("dti",             Variable))
+property_value_data <- results %>% filter(grepl("property_value",  Variable))
+sex_data            <- results %>% filter(grepl("sex",             Variable))
+loan_amt_data       <- results %>% filter(grepl("loan",            Variable))
+
+# 1. Income Trend Plot
+ggplot(income_data, aes(x = as.numeric(Year), y = Estimate, color = Variable)) +
+  geom_line(size = 1) + geom_point(size = 2) +
+  labs(title = "Trend Analysis of Log Odds of Denial by Income Over Years",
+       x = "Year", y = "Log Odds of Denial (Estimate)", color = "Income Bins") +
+  theme_minimal() + theme(legend.position = "right")
+
+# 2. Race Trend Plot
+ggplot(race_data, aes(x = as.numeric(Year), y = Estimate, color = Variable)) +
+  geom_line(size = 1) + geom_point(size = 2) +
+  labs(title = "Trend Analysis of Log Odds of Denial by Race Over Years",
+       x = "Year", y = "Log Odds of Denial (Estimate)", color = "Race") +
+  theme_minimal() + theme(legend.position = "right")
+
+# 3. LTV Trend Plot
+ggplot(ltv_data, aes(x = as.numeric(Year), y = Estimate, color = Variable)) +
+  geom_line(size = 1) + geom_point(size = 2) +
+  labs(title = "Trend Analysis of Log Odds of Denial by Loan-to-Value Ratio Over Years",
+       x = "Year", y = "Log Odds of Denial (Estimate)", color = "LTV Bins") +
+  theme_minimal() + theme(legend.position = "right")
+
+# 4. DTI Trend Plot
+ggplot(dti_data, aes(x = as.numeric(Year), y = Estimate, color = Variable)) +
+  geom_line(size = 1) + geom_point(size = 2) +
+  labs(title = "Trend Analysis of Log Odds of Denial by Debt-to-Income Ratio Over Years",
+       x = "Year", y = "Log Odds of Denial (Estimate)", color = "DTI") +
+  theme_minimal() + theme(legend.position = "right")
+
+# 5. Property Value Trend Plot
+ggplot(property_value_data, aes(x = as.numeric(Year), y = Estimate, color = Variable)) +
+  geom_line(size = 1) + geom_point(size = 2) +
+  labs(title = "Trend Analysis of Log Odds of Denial by Property Value Over Years",
+       x = "Year", y = "Log Odds of Denial (Estimate)", color = "Property Value Bins") +
+  theme_minimal() + theme(legend.position = "right")
+
+# 6. Sex Denial Trend Plot
+ggplot(sex_data, aes(x = as.numeric(Year), y = Estimate, color = Variable)) +
+  geom_line(size = 1) + geom_point(size = 2) +
+  labs(title = "Trend Analysis of Log Odds of Denial by Gender Over Years",
+       x = "Year", y = "Log Odds of Denial (Estimate)", color = "Gender") +
+  theme_minimal() + theme(legend.position = "right")
+
+# 7. Loan Amount Trend Plot
+ggplot(loan_amt_data, aes(x = as.numeric(Year), y = Estimate, color = Variable)) +
+  geom_line(size = 1) + geom_point(size = 2) +
+  labs(title = "Trend Analysis of Log Odds of Denial by Loan Amount Over Years",
+       x = "Year", y = "Log Odds of Denial (Estimate)", color = "Loan Amount") +
+  theme_minimal() + theme(legend.position = "right")
+```
+
+
+---
+
+# Appendix A2 — Denial Rate by Year
+
+```{r appendix_a2}
+
+app_a2 <- df_3 %>%
+  mutate(activity_year = as.integer(as.character(activity_year))) %>%
+  group_by(activity_year) %>%
+  summarise(
+    `Number of Applications` = n(),
+    `Denial Rate`            = paste0(
+      round(mean(derived_action_taken == "Denied") * 100, 2), "%"),
+    .groups = "drop"
+  ) %>%
+  arrange(activity_year) %>%
+  mutate(`#` = row_number()) %>%
+  dplyr::select(`#`, Year = activity_year,
+                `Number of Applications`, `Denial Rate`)
+
+kable(app_a2,
+      caption   = "Appendix A2: Denial Rate by Year",
+      booktabs  = TRUE,
+      align     = c("r","r","r","r"),
+      row.names = FALSE) %>%
+  kable_styling(latex_options = c("striped", "hold_position"), font_size = 10)
+
+```

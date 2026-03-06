@@ -1,0 +1,411 @@
+---
+title: "TX"
+author: "Victoria"
+date: "2024-10-28"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+setwd('/Users/victoria/Library/CloudStorage/OneDrive-BowlingGreenStateUniversity/Subs/mortage_research/Analysis/mortgage-app-rates-bayesian-analysis/AssociationAnalysis')
+
+## Package names
+packages <- c('data.table',"conflicted","car","forcats","readr","tidyverse","tinytex", "datasets","papaja" ,"here","data.table",
+              "DBI","RSQLite","maps","usmap","stringr","dplyr","dbplyr","knitr","forcats","parallel","psych","crunch")
+
+## Install packages not yet installed
+installed_packages <- packages %in% rownames(installed.packages())
+if (any(installed_packages == FALSE)) {
+  install.packages(packages[!installed_packages])
+}
+
+##Packages loading
+invisible(lapply(packages, library, character.only = TRUE))
+conflicts_prefer(dplyr::filter())
+conflicts_prefer(crunch::combine)
+conflicts_prefer(car::recode)
+
+data_18<- fread('state_TX_2018.csv')
+data_19<- fread('state_TX_2019.csv')
+data_20<- fread('state_TX_2020.csv')
+data_21<- fread('state_TX_2021.csv')
+data_22<- fread('state_TX_2022.csv')
+data_23<- fread('state_TX_2023.csv')
+
+
+# Combine all the data tables into one
+merged_data <- rbindlist(list(data_18, data_19, data_20, data_21, data_22, data_23), use.names = TRUE, fill = TRUE)
+
+varnums<- function(x) {
+  w=as.data.frame(c(1:length(colnames(x))),paste0('# ',colnames(x)))
+  names(w)= c("# Var/Pos")
+  w
+}
+
+```
+
+
+# Redefine Columns
+
+```{r data}
+remove_cols<- function(df){
+  w = df %>%
+    filter(loan_term == "360" &
+           lien_status == 1 & 
+           construction_method== 1 & 
+           business_or_commercial_purpose==2&
+           total_units == 1 &
+           loan_purpose == 1&
+           occupancy_type == 1&
+           conforming_loan_limit == "C"&
+           derived_race != "Free Form Text Only" )
+  w
+}
+
+df<- remove_cols(merged_data)
+
+df <- df[,-c(7,9,17,18,19,21,24:38,40,41:44,45,51:59,63:66,68:73,76,77,80:83,85:88,92)]
+
+df[,c(1:15,21:35)]<- lapply(df[,c(1:15,21:35)], factor)
+
+
+conflicts_prefer(dplyr::recode)
+df <- df%>%
+  filter(!(action_taken %in% c("7", "8")))
+df$derived_action_taken<- recode(df$action_taken, 'c("1","6") = "Approved"; c("2", "3")= "Denied"; else = "Withdrawn/Incomplete"')
+
+df$derived_applicant_sex<- recode(df$applicant_sex,'c("1") = "Male"; c("2") = "Female";c("4") = "Not Applicable";else = "Other"')
+
+df$derived_co_applicant_sex<- recode(df$`co-applicant_sex`,'c("1") = "Male"; c("2") = "Female";c("4") = "Not Applicable";c("5") = "No_Coapplicant"; else = "Other"')
+
+df$denial_reason_1<- recode(df$`denial_reason-1`,'c("1") = "DTI ratio"; c("2") = "Emplmnt hist";c("3") = "Credit Hist";c("4") = "Collateral";c("5") = "Insuf Cash";c("6")="Unverifieable";c("7")="Incomplete Appl";c("8")="Insurance Denied";c("1111")="Exempt";c("10")="NA"; else = "Other"')
+
+desired_order_age_applicant<- c('<25','25-34','35-44','45-54','55-64','65-74','>74','8888')
+df$applicant_age<- factor(df$applicant_age,levels = desired_order_age_applicant)
+
+#race
+
+df <- df %>%
+  mutate(race = ifelse(derived_ethnicity == "Joint" | derived_race == "Joint" | derived_sex == "Joint" | derived_co_applicant_sex %in% c(1,2,6),"Joint",
+                       ifelse(derived_ethnicity =="Hispanic or Latino" & (`applicant_race-1` %in% c(5,6,7) | derived_race %in% c("White", "Race Not Available")), "Hispanic White",
+                              ifelse(`applicant_race-1` %in% c(2,27) | derived_race == "Asian", "Asian",
+                                     ifelse(derived_ethnicity =="Not Hispanic or Latino" & (`applicant_race-1` %in%c(5,6,7) | derived_race == "White") | derived_race == "White", "Non-Hispanic White",
+                                            ifelse((`applicant_race-1` %in% c(1,4,21:26, 41:43) | derived_race %in% c("2 or more minority races", "American Indian or Alaska Native", "Native Hawaiian or Other Pacific Islander")), "Other Minority Races",
+                                                          ifelse((`applicant_race-1` == 3 | derived_race== "Black or African American"), "Black or African American",'Missing')))))))
+
+
+```
+
+
+# Select features to begin with
+
+Here, I choose to retain variables used in the initial model.
+
+```{r}
+df_2<- df%>%
+  dplyr::select(-c(2:4,12:13,22:27,31,32,34,35))
+```
+
+# Removed NA values in income, DTI, LTV
+I jut removed every row with missing data
+
+```{r}
+### remove income = NA
+df_3<- df_2 %>%
+  filter(income != 'NA')
+df_3<- df_2 %>%
+  filter(income != 0)
+df_3<- na.omit(df_3)
+
+df_3[, c(12:14, 21:27)] <- as.data.frame(lapply(df_3[, c(12:14, 21:27)], as.numeric))
+  
+```
+
+
+
+# more variables
+
+```{r}
+
+df_3$income_bins<- cut(df_3$income, breaks = c(0,50, 100, 150, 200, 300, 400,500,600,1000,2000,Inf), include.lowest = TRUE)
+df_3$log_income<- log(df_3$income) 
+
+df_3$ltv_bins<- cut(df_3$loan_to_value_ratio, breaks = c(0,60,80,90,100,150,Inf), include.lowest = TRUE)
+
+df_3$dti_bins<- ifelse(df_3$debt_to_income_ratio %in% c("<20%",'20%-<30%','30%-<36%'), '<36%',
+                       ifelse(df_3$debt_to_income_ratio %in% c('36','37','38','39','40','41','42'),'36%-42%',
+                              ifelse(df_3$debt_to_income_ratio %in% c('43','44','45','46','47','48','49'),'43%-49%',
+                                 ifelse(df_3$debt_to_income_ratio  == '50%-60%', '50%-60%', '>60%'))))
+desired_order_dti<- c('<36%','36%-42%','43%-49%','50%-60%', '>60%')
+df_3$dti_bins<- factor(df_3$dti_bins,levels = desired_order_dti)
+df_3$dti_g50<- ifelse(df_3$debt_to_income_ratio %in% c("<20%",'20%-<30%','30%-<36%','36','37','38','39','40','41','42',
+                                                       '43','44','45','46','47','48','49'),'<50%','>=50%')
+
+df_3$property_value_thousands<- df_3$property_value/1000
+df_3$property_value_bins<- cut(df_3$property_value_thousands, breaks = c(0,200,400,500,1000,1500,Inf), include.lowest = TRUE)
+
+df_3$loan_amt_thousands<- df_3$loan_amount/1000
+
+## change reference category
+df_3 <- within(df_3, applicant_age <- relevel(applicant_age, ref = '35-44'))
+df_3 <- within(df_3, ltv_bins <- relevel(ltv_bins, ref = '(90,100]'))
+df_3<- within(df_3, derived_race <- relevel(derived_race, ref = 'White'))
+df_3<- within(df_3, property_value_bins <- relevel(property_value_bins, ref = '(200,400]'))
+df_3<- within(df_3, derived_sex <- relevel(derived_sex, ref = 'Joint'))
+df_3<- df_3[complete.cases(df_3),]
+
+
+```
+
+
+
+# list od models to loop through
+
+```{r}
+
+model_list <- list()
+
+# Loop through each year to create a separate model
+for (yr in unique(df_3$activity_year)) {
+  yearly_data <- df_3[activity_year == yr]
+  initial_model <- glm(derived_action_taken ~ 1, data = yearly_data, family = binomial)
+  full_model <- glm(derived_action_taken ~ loan_amt_thousands + ffiec_msa_md_median_family_income +income_bins + race + derived_sex + tract_minority_population_percent+applicant_age +ltv_bins+ dti_g50 + property_value_bins , data = yearly_data, family = binomial)
+  
+  # Use stepwise forward selection; ensure doesn't print every model
+  selected_model <- step(initial_model, scope = list(lower = initial_model, upper = full_model), 
+                         direction = "forward",trace = 0)
+  
+  # Save the selected model for this year
+  model_list[[as.character(yr)]] <- selected_model
+}
+
+# View summary of each model to see selected variables and coefficients
+#for (yr in names(model_list)) {
+#  cat("Summary for year:", yr, "\n")
+#  print(summary(model_list[[yr]]))
+#}
+
+
+```
+
+
+
+
+# results of the model
+
+```{r}
+# Set significance level threshold
+significance_level <- 0.05
+results <- data.frame(Year = character(),
+                      Variable = character(),
+                      Estimate = numeric(),
+                      StdError = numeric(),
+                      stringsAsFactors = FALSE)
+for (yr in names(model_list)) {
+  model_summary <- summary(model_list[[yr]])
+  coeffs <- model_summary$coefficients
+  significant_vars <- coeffs[coeffs[, "Pr(>|z|)"] < significance_level, ]
+  if (nrow(significant_vars) > 0) {
+    year_results <- data.frame(Year = yr,
+                               Variable = rownames(significant_vars),
+                               Estimate = significant_vars[, "Estimate"],
+                               StdError = significant_vars[, "Std. Error"])
+    
+    results <- rbind(results, year_results)
+  }
+}
+
+#write.csv(results, "significant_variables.csv", row.names = FALSE)
+
+```
+
+
+
+
+# Variables used in modeling
+
+ltv
+dti
+income bins
+property_value
+race
+ffiec income
+sex
+
+```{r}
+
+# Filter data into separate data frames for each category
+
+#using old results
+results<- fread('significant_variables.csv')
+  
+  
+income_data <- results %>%
+  filter(grepl("income_bins", Variable))
+race_data <- results %>%
+  filter(grepl("race", Variable))
+ltv_data <- results %>%
+  filter(grepl("ltv_bins", Variable))
+dti_data <- results %>%
+  filter(grepl("dti", Variable))
+property_value_data <- results %>%
+  filter(grepl("property_value", Variable))
+sex_data <- results %>%
+  filter(grepl("sex", Variable))
+loan_amt_data <- results %>%
+  filter(grepl("loan", Variable))
+
+# 1. Income Trend Plot
+ggplot(income_data, aes(x = as.numeric(Year), y = Estimate, color = Variable)) +
+  geom_line(size = 1) +
+  geom_point(size = 2) +
+  labs(title = "Trend Analysis of Log Odds of Denial by Income Over Years",
+       x = "Year",
+       y = "Log Odds of Denial (Estimate)",
+       color = "Income Bins") +
+  theme_minimal() +
+  theme(legend.position = "right")
+
+# 2. Race Trend Plot
+ggplot(race_data, aes(x = as.numeric(Year), y = Estimate, color = Variable)) +
+  geom_line(size = 1) +
+  geom_point(size = 2) +
+  labs(title = "Trend Analysis of Log Odds of Denial by Race Over Years",
+       x = "Year",
+       y = "Log Odds of Denial (Estimate)",
+       color = "Race") +
+  theme_minimal() +
+  theme(legend.position = "right")
+
+# 3. Loan-to-Value (LTV) Trend Plot
+ggplot(ltv_data, aes(x = as.numeric(Year), y = Estimate, color = Variable)) +
+  geom_line(size = 1) +
+  geom_point(size = 2) +
+  labs(title = "Trend Analysis of Log Odds of Denial by Loan-to-Value Ratio Over Years",
+       x = "Year",
+       y = "Log Odds of Denial (Estimate)",
+       color = "LTV Bins") +
+  theme_minimal() +
+  theme(legend.position = "right")
+
+
+
+# 4. DTI Trend Plot
+ggplot(dti_data, aes(x = as.numeric(Year), y = Estimate, color = Variable)) +
+  geom_line(size = 1) +
+  geom_point(size = 2) +
+  labs(title = "Trend Analysis of Log Odds of Denial by Debt-to-Income Ratio Over Years",
+       x = "Year",
+       y = "Log Odds of Denial (Estimate)",
+       color = "DTI") +
+  theme_minimal() +
+  theme(legend.position = "right")
+
+# 5. Property Value Trend Plot
+ggplot(property_value_data, aes(x = as.numeric(Year), y = Estimate, color = Variable)) +
+  geom_line(size = 1) +
+  geom_point(size = 2) +
+  labs(title = "Trend Analysis of Log Odds of Denial by Property Value Over Years",
+       x = "Year",
+       y = "Log Odds of Denial (Estimate)",
+       color = "Property Value Bins") +
+  theme_minimal() +
+  theme(legend.position = "right")
+
+
+# 6. Sex Denial Trend Plot
+ggplot(sex_data, aes(x = as.numeric(Year), y = Estimate, color = Variable)) +
+  geom_line(size = 1) +
+  geom_point(size = 2) +
+  labs(title = "Trend Analysis of Log Odds of Denial by Gender Over Years",
+       x = "Year",
+       y = "Log Odds of Denial (Estimate)",
+       color = "Gender") +
+  theme_minimal() +
+  theme(legend.position = "right")
+
+
+# 7.Loan amount Trend Plot
+ggplot(loan_amt_data, aes(x = as.numeric(Year), y = Estimate, color = Variable)) +
+  geom_line(size = 1) +
+  geom_point(size = 2) +
+  labs(title = "Trend Analysis of Log Odds of Denial by Loan Amount Over Years",
+       x = "Year",
+       y = "Log Odds of Denial (Estimate)",
+       color = "Loan Amount") +
+  theme_minimal() +
+  theme(legend.position = "right")
+
+```
+
+
+
+
+
+
+
+# Stay Safe and rename
+
+### May remove
+
+```{r}
+
+#df<- copy(training)
+
+# df <-  df%>% 
+#   rename(
+#     bad_flag = 'bad_flag',
+#     fico_score = 'fico',
+#     amt_financed = 'amtfinanced_1req',
+#     new_used = 'collateral_dlrinput_newused_1req',
+#     pti = 'pti_1req',
+#     ltv = 'ltv_1req',
+#     gender = 'Gender',
+#     race = 'Race',
+#     avg_lifespan_bankcard = 'p12_bca8370_a',
+#     avg_trade_lifespan = 'p12_all8370_a',
+#     recent_bankcard_months = 'p12_bcc8120_a',
+#     open_bankcard_5k = 'p12_bcc3456_a',
+#     recent_personal_trade_months = 'p12_pil8120_a',
+#     max_bal_credit_ratio = 'p12_reh7120_a',
+#     max_single_bal_credit_ratio_6 = 'p12_all7120_a',
+#     overall_bal_credit_ratio_bcc = 'p12_bcx7110_a',
+#     auto_loan_bal_credit_ratio = 'p12_aut7110_a',
+#     open_retail_bal_credit_ratio_6 = 'p12_rtr7110_a',
+#     past_due_bal_ratio = 'p12_all7170_a',
+#     worst_status_first_year = 'p12_all6250_a',
+#     worst_trade_status = 'p12_alm6200_a',
+#     worst_auto_trade = 'p12_aua6200_a',
+#     never_delinquent_pct_12 = 'p12_all7937_a',
+#     open_installment_pct_6 = 'p12_iln7410_a',
+#     revolving_never_delinq = 'p12_rev1300_a',
+#     total_trades_never_delinq = 'p12_als1300_a',
+#     total_inquiries_12 = 'clact9429_a',
+#     inquiries_past_90 = 'clact9428_a',
+#     non_trad_inquiries_12 = 'clntr9437_a',
+#     oldest_installment_months = 'p12_iln8220_a',
+#     months_open_oldest_auto = 'p12_aua8220_a',
+#     total_balance_trades = 'clall5010_a',
+#     total_auto_trades = 'p12_aua0300_a',
+#     recent_over_90_delinq_accs = 'clall2434_a',
+#     recent_auto_delinquency_days = 'p12_aua8151_a',
+#     trades_ever_delinq_12 = 'p12_all2427_a',
+#     worst_trade_status_first_year = 'p12_all6971_a',
+#     
+#   )
+
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
